@@ -264,7 +264,7 @@ def create_toe_pipeline(
     sdxl_model_path: str = "stabilityai/stable-diffusion-xl-base-1.0",
     device: str = "cuda",
     use_hybrid: bool = True,
-    torch_dtype = torch.float16,
+    torch_dtype = None,  # Auto-detect based on device
 ):
     """
     Create SDXL pipeline with TOE text encoder.
@@ -278,11 +278,16 @@ def create_toe_pipeline(
         sdxl_model_path: HuggingFace model ID or path to .safetensors
         device: Device to use
         use_hybrid: Use hybrid mode (TOE context + CLIP pooled)
-        torch_dtype: Data type for pipeline
+        torch_dtype: Data type for pipeline (None = auto: FP32 for CPU, FP16 for CUDA)
         
     Returns:
         SDXL pipeline with TOE encoding (as monkey-patched method)
     """
+    # Auto-detect dtype based on device
+    if torch_dtype is None:
+        torch_dtype = torch.float32 if device == "cpu" else torch.float16
+        print(f"   Auto-selected dtype: {torch_dtype} for device={device}")
+    
     from hqpd.models.toe import TagOptimizedEncoder
     from hqpd.utils.danbooru import DanbooruTagProcessor
     
