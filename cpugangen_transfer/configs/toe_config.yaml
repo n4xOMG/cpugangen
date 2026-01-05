@@ -1,0 +1,55 @@
+# Tag-Optimized Encoder Training Configuration
+
+# Model Architecture
+model:
+  vocab_size: 15000
+  embed_dim: 2048
+  num_layers: 4
+  num_heads: 8
+  mlp_ratio: 2
+  max_length: 77
+  quantize_embeddings: false  # Set to true after initial training
+
+# Data
+data:
+  dataset_name: "example/danbooru"  # Replace with actual dataset
+  num_samples: 10000  # Start with 10K for testing
+  train_split: 0.9
+  val_split: 0.1
+  batch_size: 8
+  num_workers: 4
+  max_tags_per_image: 77
+  clip_embeddings_path: "data/clip_embeddings"  # Set to null to use dummy embeddings
+
+# Training
+training:
+  num_epochs: 20
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 1000
+  gradient_accumulation_steps: 4
+  mixed_precision: true  # FP16 training
+  
+  # Knowledge Distillation
+  distillation_loss: "mse"  # or "cosine"
+  distillation_weight: 1.0
+  
+  # Checkpointing
+  save_every_n_epochs: 5
+  checkpoint_dir: "./checkpoints/toe"
+  
+# CLIP (Teacher Model)
+clip:
+  model_name: "stabilityai/stable-diffusion-xl-base-1.0"
+  cache_dir: "./models/cache"
+  
+# Logging
+logging:
+  use_wandb: false  # Set to true if you have wandb
+  project_name: "hqpd-toe"
+  log_every_n_steps: 50
+  
+# Hardware
+hardware:
+  device: "cuda"  # cuda or cpu
+  enable_tf32: true

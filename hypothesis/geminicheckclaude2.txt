@@ -1,0 +1,127 @@
+================================================================================
+TÊN TÀI LIỆU: ĐỀ XUẤT NGHIÊN CỨU (REVISED) - ULTRA-LOW RAM ANIME PROMPT ENCODER
+PHƯƠNG PHÁP: PRE-COMPUTED EMBEDDINGS + PERMUTATION-INVARIANT AGGREGATOR
+PHIÊN BẢN: 4.0 (POST-CRITIQUE ADJUSTMENT)
+NGÀY LẬP: 01/01/2026
+TRẠNG THÁI: SẴN SÀNG CHO POC (PROOF OF CONCEPT)
+================================================================================
+
+1. TÓM TẮT ĐIỀU CHỈNH (KEY ADJUSTMENTS FROM V3.0)
+--------------------------------------------------------------------------------
+Dựa trên phản biện kỹ thuật, phiên bản này thay đổi các định hướng cốt lõi:
+1. Xác định lại mục tiêu: Tập trung tối đa vào GIẢM RAM (cho máy 8GB) thay vì 
+   hứa hẹn tăng tốc độ tổng thể (do UNet vẫn là điểm nghẽn chính).
+2. Điều chỉnh kiến trúc: Loại bỏ Positional Encoding (do tags không có thứ tự), 
+   chuyển sang kiến trúc Permutation-Invariant (Attention-based).
+3. Xử lý từ vựng: Tăng coverage lên 20,000 tags và thêm cơ chế Fallback (Hashing)
+   để xử lý Out-of-Vocabulary (OOV).
+4. Hạ kỳ vọng: Mục tiêu là "Tiệm cận chất lượng CLIP" (>90%) thay vì "Giữ nguyên
+   100%" hay "Khắc phục lỗi của CLIP".
+
+2. BỐI CẢNH & VẤN ĐỀ THỰC TẾ
+--------------------------------------------------------------------------------
+2.1. Vấn đề cốt lõi (Pain Point):
+   - Môi trường: Laptop sinh viên/văn phòng (8GB RAM, iGPU/CPU).
+   - CLIP Model (ViT-B/32) chiếm ~600MB RAM và cần nạp vào bộ nhớ liên tục.
+   - Khi chạy kèm mô hình sinh ảnh (DiT/UNet ~2-4GB), 600MB này là gánh nặng lớn,
+     dễ gây tràn RAM (OOM) hoặc đẩy hệ thống dùng Swap (gây chậm kinh khủng).
+
+2.2. Sự thật về hiệu năng (Performance Reality Check):
+   - Thay thế CLIP không làm quá trình sinh ảnh nhanh hơn đáng kể (vì UNet chiếm 
+     90% thời gian).
+   - TUY NHIÊN, thay thế CLIP giúp giải phóng RAM để hệ thống *có thể chạy được* mà không crash hoặc swap. Đây là giá trị thực sự (Enabler, not Accelerator).
+
+3. GIẢ THUYẾT NGHIÊN CỨU (REVISED HYPOTHESIS H4)
+--------------------------------------------------------------------------------
+"Bằng cách thay thế CLIP Text Encoder nặng nề bằng một hệ thống tra cứu bảng 
+(Lookup Table) chứa 20,000 vector pre-computed của Danbooru tags, kết hợp với 
+một mạng nơ-ron tổng hợp nhỏ (Aggregator) có tính chất 'Permutation Invariant':
+
+   1. Hệ thống sẽ giảm mức tiêu thụ RAM của Encoder từ ~600MB xuống <50MB (giảm 92%).
+   2. Duy trì độ tương đồng ngữ nghĩa (Cosine Similarity) > 0.90 so với CLIP gốc 
+      trên các tổ hợp tags phổ biến.
+   3. Có khả năng xử lý các tags chưa từng gặp (OOV) thông qua cơ chế Hashing 
+      mà không làm gãy vỡ pipeline."
+
+4. THIẾT KẾ KỸ THUẬT (TECHNICAL ARCHITECTURE)
+--------------------------------------------------------------------------------
+4.1. Dictionary & Pre-computation (Offline):
+   - Input: Top 20,000 Danbooru tags (tăng từ 10k để phủ long-tail).
+   - Engine: CLIP ViT-B/32 gốc.
+   - Output: `lookup_table.bin` (Key: Tag Hash -> Value: 512-dim FP16 vector).
+   - Size dự kiến: ~20MB.
+
+4.2. Runtime Aggregator (Online):
+   - Input: List of Tags ["1girl", "blue_eyes", "unknown_tag"]
+   
+   [A] Embedding Retrieval:
+       - Nếu Tag in Dict: Lấy vector pre-computed.
+       - Nếu Tag OOV (Unknown): Sử dụng Hashing Trick -> Map vào một Learnable 
+         Embedding Table nhỏ (ví dụ: 1000 slot chung cho các từ lạ) để model 
+         tự học cách xử lý nhiễu.
+   
+   [B] Aggregator Network (Permutation Invariant):
+       - Không dùng Positional Encoding (vì "1girl, solo" == "solo, 1girl").
+       - Architecture: Self-Attention Layer (Transformer Encoder Block nhưng bỏ PE).
+       - Cơ chế: Cho phép các tags "giao tiếp" với nhau để điều chỉnh trọng số 
+         (ví dụ: "blue" đi với "eyes" sẽ được chú ý hơn "blue" đứng một mình).
+   
+   [C] Output Head:
+       - Mean Pooling -> Linear Projection -> LayerNorm.
+       - Output: 1 vector 512-dim tương thích không gian CLIP.
+
+5. CHIẾN LƯỢC HUẤN LUYỆN (TRAINING STRATEGY)
+--------------------------------------------------------------------------------
+Dataset: 1 triệu tổ hợp tags ngẫu nhiên từ Danbooru metadata.
+
+Loss Function (Hybrid):
+   1. Cosine Embedding Loss: Đẩy vector output về gần vector CLIP gốc.
+   2. Contrastive Loss (New!):
+      - Anchor: Aggregator Output.
+      - Positive: CLIP Output của đúng prompt đó.
+      - Negative: CLIP Output của prompt đã bị xáo trộn (ví dụ: đổi màu tóc, 
+        đổi trang phục).
+      -> Giúp model tránh việc luôn output ra một "vector trung bình vô nghĩa".
+
+6. KẾ HOẠCH TRIỂN KHAI & METRICS
+--------------------------------------------------------------------------------
+Giai đoạn 1: Proof of Concept (POC) - 3 Ngày
+   - Mục tiêu: Chỉ chứng minh Aggregator học được.
+   - Task:
+     1. Build Lookup 20k tags.
+     2. Train Aggregator nhỏ (2 layers).
+     3. Test trên tập validation (các tổ hợp tags chưa gặp).
+   - Success Metric: Cosine Similarity > 0.90. (Nếu < 0.85 -> Hủy dự án).
+
+Giai đoạn 2: Integration - 4 Ngày
+   - Tích hợp vào pipeline sinh ảnh (Stable Diffusion/DiT dummy).
+   - Đo đạc RAM thực tế (sử dụng `memory_profiler`).
+
+7. PHÂN TÍCH RỦI RO CẬP NHẬT (RISK ANALYSIS)
+--------------------------------------------------------------------------------
+Rủi ro 1: "Mode Collapse" (Mất chi tiết)
+   - Mô tả: Aggregator chỉ học được "đây là con gái" nhưng quên mất "mắt xanh".
+   - Mitigate: Tăng trọng số Loss cho các tính từ (adjectives) và thêm Contrastive Loss.
+
+Rủi ro 2: OOV Performance kém
+   - Mô tả: Gặp từ lạ (tên nhân vật mới), model sinh ra vector rác làm hỏng ảnh.
+   - Mitigate: Dùng cơ chế "Dropout" tags trong lúc train (cố tình che bớt tags 
+     để ép model đoán dựa trên context còn lại).
+
+Rủi ro 3: Không gian vector không tuyến tính
+   - Mô tả: Cộng vector (Attention) không tái tạo được sự phức tạp của 12 lớp CLIP.
+   - Chấp nhận: Đây là đánh đổi (Trade-off). Chất lượng sẽ thấp hơn CLIP gốc 
+     một chút để đổi lấy RAM.
+
+================================================================================
+KẾT LUẬN CHO PHIÊN BẢN 4.0
+================================================================================
+Phiên bản này thực tế hơn, khiêm tốn hơn nhưng khả thi hơn.
+Chúng ta không đi tìm "Chén Thánh" về tốc độ hay chất lượng tuyệt đối.
+Chúng ta đi tìm giải pháp "Cứu cánh" cho người dùng máy yếu:
+"Hy sinh 5-10% độ chính xác prompt phức tạp để đổi lấy khả năng chạy được trên 8GB RAM."
+
+NEXT ACTION:
+- Code script `build_lookup.py` để tạo dictionary 20k tags.
+- Bắt đầu POC Training loop.
+================================================================================

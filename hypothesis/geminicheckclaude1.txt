@@ -1,0 +1,76 @@
+file_content = """
+# RESEARCH HYPOTHESIS v3.0: PRE-COMPUTED QUANTIZED TAG DICTIONARY (PQTD)
+Based on the previous research in the claude_hypothesisv1.mo
+
+> **Project Name:** CPU-Efficient Anime Generation
+> **Hypothesis Name:** "The Zero-Compute Text Encoder"
+> **Version:** v3.0 (Pivot from Hybrid Architecture)
+> **Date:** 2026-01-01
+> **Author:** Gemini (AI Assistant) & User
+
+---
+
+## 1. Vấn đề của các phiên bản trước
+- **v1.0 (Simple Embedding):** Chất lượng thấp, cold-start problem, mất ngữ nghĩa.
+- **v2.0 (Hybrid CLIP+BERT):** Quá phức tạp (Over-engineered), không gian vector bị lệch (misaligned), nút thắt cổ chai tại Python overhead, mất thông tin không gian (spatial info) do pooling.
+
+## 2. Giả thuyết Cốt lõi (Core Hypothesis)
+
+> "Đối với bài toán tạo ảnh Anime từ Danbooru Tags, việc **Tra cứu (Lookup)** từ một từ điển Vector đã tính sẵn (Pre-computed) sẽ nhanh hơn **100 lần** và đạt chất lượng **tương đương Teacher Model** so với việc chạy Text Encoder thời gian thực."
+
+Chúng ta có thể nén không gian ngữ nghĩa của một model khổng lồ (CLIP ViT-L/14) vào một bảng tra cứu nhỏ gọn (< 200MB) chạy hoàn toàn trên RAM hệ thống.
+
+---
+
+## 3. Kiến trúc Đề xuất: "Look-up & Fallback"
+
+Thay vì dùng Neural Network làm cốt lõi, ta dùng Hash Map làm cốt lõi.
+
+### 3.1. The Dictionary (Hot Path - 95% traffic)
+- **Cấu trúc:** Key-Value Store (Hash Map).
+    - **Key:** Hash của Tag string (ví dụ: `hash("hatsune_miku")`).
+    - **Value:** Vector embedding (768-dim hoặc 1024-dim).
+- **Nguồn dữ liệu:** Sử dụng CLIP ViT-L/14 (Large) để encode trước toàn bộ 300.000 tags phổ biến nhất của Danbooru.
+- **Tối ưu RAM (Critical):**
+    - Raw: 300k tags * 768 dims * 4 bytes (float32) ≈ 921 MB (Quá lớn).
+    - **Solution:** PCA reduction (xuống 512 dims) + Int8 Quantization.
+    - Optimized: 300k * 512 * 1 byte ≈ **153 MB** (Rất nhẹ, load RAM cực nhanh).
+
+### 3.2. The Fallback (Cold Path - 5% traffic)
+- Xử lý các tag lạ, OOV (Out-of-Vocabulary), hoặc custom prompt của user không có trong Danbooru.
+- Sử dụng **ONNX Quantized Tiny-CLIP** (chỉ Text Encoder, lớp mỏng).
+- Chỉ chạy khi không tìm thấy tag trong Dictionary.
+
+### 3.3. Output Formatting (Giải quyết lỗi v2.0)
+- **Không dùng Global Pooling.**
+- Output là một Tensor `[Batch_Size, Max_Seq_Len, Embed_Dim]`.
+- Các vector tìm được từ Dictionary sẽ được xếp vào chuỗi (Sequence) để giữ thông tin thứ tự (giúp phân biệt "Blue hair, Red eyes" với "Red hair, Blue eyes").
+
+---
+
+## 4. Implementation Strategy
+
+### Phase 1: Pre-computation (Offline - Chạy 1 lần duy nhất)
+1. Tải danh sách tags Danbooru (Top 300k).
+2. Load CLIP ViT-L/14 (hoặc model anime-specific xịn nhất như Waifu-Diffusion CLIP).
+3. Encode tất cả tags -> Float32 Vectors.
+4. Fit PCA để giảm chiều dữ liệu (giữ 95% variance).
+5. Quantize vectors sang Int8.
+6. Lưu thành file binary (`tag_dict.bin`).
+
+### Phase 2: Inference Engine (Runtime)
+```python
+def encode_prompt(prompt_tags):
+    embeddings = []
+    for tag in prompt_tags:
+        if tag in tag_dictionary:
+             # O(1) Lookup
+             vec = tag_dictionary[tag] # Int8
+             vec = dequantize(vec)     # To Float32
+        else:
+             # Fallback (Slow path)
+             vec = tiny_clip_onnx.encode(tag)
+        embeddings.append(vec)
+    
+    # Pad to max_length
+    return stack_and_pad(embeddings)

@@ -1,0 +1,8 @@
+data/coco/
+data/danbooru_sample/
+data/api_captions_20260104_131006.json
+__pycache__
+venv/
+*.zip
+outputs/
+data/tags.json

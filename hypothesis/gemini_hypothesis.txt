@@ -1,0 +1,94 @@
+================================================================================
+TÊN TÀI LIỆU: ĐỀ XUẤT NGHIÊN CỨU & TRIỂN KHAI MÔ HÌNH SINH ẢNH ANIME TRÊN CPU
+PHƯƠNG PHÁP: KNOWLEDGE DISTILLATION (CHƯNG CẤT TRI THỨC)
+PHIÊN BẢN: 2.0 (REVISED)
+NGÀY LẬP: 01/01/2026
+================================================================================
+
+1. TỔNG QUAN (EXECUTIVE SUMMARY)
+--------------------------------------------------------------------------------
+Dự án nhằm mục tiêu tối ưu hóa tốc độ và tài nguyên (RAM) cho quá trình sinh ảnh 
+Anime trên các thiết bị CPU phổ thông. Thay vì sử dụng Text Encoder khổng lồ như 
+CLIP (gây tốn kém tài nguyên) hoặc Bảng tra cứu đơn giản (gây mất mát ngữ nghĩa), 
+chúng tôi đề xuất phương pháp lai: "Micro-Tag-Encoder".
+
+Mô hình này sử dụng kiến trúc Transformer siêu nhỏ, được huấn luyện để mô phỏng 
+(mimic) không gian vector của CLIP thông qua kỹ thuật Knowledge Distillation.
+
+2. BỐI CẢNH & VẤN ĐỀ (CONTEXT & PROBLEM)
+--------------------------------------------------------------------------------
+2.1. Giới hạn phần cứng:
+   - Mục tiêu: CPU Consumer (Core i5/i7, Ryzen 5/7), không có GPU rời.
+   - Rào cản chính: Dung lượng RAM hạn chế (8GB/16GB). Việc load CLIP model (~600MB) 
+     chiếm dụng bộ nhớ quý giá cần thiết cho quá trình Denoising của UNet/DiT.
+
+2.2. Đặc thù dữ liệu:
+   - Input: Danbooru tags (từ khóa rời rạc: "1girl, blue_eyes, solo...").
+   - Vấn đề của phương pháp cũ (Embedding Lookup/Average Pooling):
+     Gây ra hiện tượng "Attribute Bleeding" (trộn lẫn thuộc tính). 
+     Ví dụ: Prompt "blue_hair, red_eyes" bị hiểu nhầm thành màu tím pha trộn 
+     do phép tính trung bình cộng vector làm mất thông tin vị trí và liên kết từ.
+
+3. GIẢ THUYẾT NGHIÊN CỨU (HYPOTHESIS H1)
+--------------------------------------------------------------------------------
+"Việc thay thế CLIP bằng một mô hình Micro-Transformer (2 lớp) được huấn luyện 
+bằng phương pháp Knowledge Distillation sẽ giảm 90% lượng RAM tiêu thụ cho bước 
+Text Encoding, đồng thời giữ lại được >95% độ chính xác ngữ nghĩa (Semantic Alignment) 
+so với CLIP gốc, khắc phục hoàn toàn lỗi trộn lẫn thuộc tính."
+
+4. THIẾT KẾ KỸ THUẬT (TECHNICAL ARCHITECTURE)
+--------------------------------------------------------------------------------
+4.1. Kiến trúc Teacher (Người dạy):
+   - Model: CLIP ViT-B/32 (Frozen weights).
+   - Vai trò: Cung cấp vector chuẩn (Ground Truth Embeddings).
+
+4.2. Kiến trúc Student (Người học - Micro-Encoder):
+   - Type: Transformer Encoder.
+   - Depth: 2 Layers (so với 12 của CLIP).
+   - Hidden Dimension: 256 (Project lên 512 ở Output).
+   - Attention Heads: 4.
+   - Parameters: ~2-3 triệu tham số (Siêu nhẹ).
+
+4.3. Quy trình Inference (Sau khi train):
+   [Tags Input] -> [Micro-Encoder] -> [Vector 512d] -> [DiT Generator] -> [Image]
+
+5. PHƯƠNG PHÁP THỰC NGHIỆM (METHODOLOGY)
+--------------------------------------------------------------------------------
+Giai đoạn 1: Distillation (Chưng cất)
+   - Dataset: 500,000 chuỗi tags ngẫu nhiên từ Danbooru dataset.
+   - Loss Function: Cosine Embedding Loss (Tối ưu hóa góc giữa vector Student và Teacher).
+   - Mục tiêu: Maximize Cosine Similarity > 0.90.
+
+Giai đoạn 2: Generation Training
+   - Model sinh ảnh: DiT-Tiny (Diffusion Transformer).
+   - Conditioning: Sử dụng vector từ Micro-Encoder đã train ở Giai đoạn 1.
+   - So sánh đối chứng:
+     + Nhóm A: DiT + CLIP gốc.
+     + Nhóm B: DiT + Micro-Encoder.
+
+6. CHỈ SỐ ĐÁNH GIÁ (METRICS)
+--------------------------------------------------------------------------------
+1. Hiệu năng hệ thống:
+   - RAM Peak Usage (MB).
+   - Model Loading Time (ms).
+
+2. Chất lượng ngữ nghĩa:
+   - Attribute Binding Accuracy: Kiểm tra khả năng phân biệt (VD: tóc ngắn/váy dài vs tóc dài/váy ngắn).
+   - FID Score (Fréchet Inception Distance): Đo độ tự nhiên của ảnh.
+
+7. KẾ HOẠCH TRIỂN KHAI (ROADMAP)
+--------------------------------------------------------------------------------
+- Tuần 1: Chuẩn bị dữ liệu text Danbooru & Xây dựng kiến trúc Micro-Encoder.
+- Tuần 2: Thực hiện Knowledge Distillation (Train Student model).
+- Tuần 3: Tích hợp vào DiT-Tiny và train mô hình sinh ảnh.
+- Tuần 4: Đánh giá, Benchmark và tối ưu hóa code inference (Quantization).
+
+8. KẾT LUẬN DỰ KIẾN
+--------------------------------------------------------------------------------
+Giải pháp này không chỉ giải quyết bài toán chạy AI trên máy yếu mà còn mở ra 
+hướng đi cho việc nhúng AI vào các ứng dụng di động hoặc web-based (WASM) 
+trong tương lai nhờ kích thước mô hình cực nhỏ.
+
+================================================================================
+NGƯỜI ĐỀ XUẤT: Gemini AI
+================================================================================
