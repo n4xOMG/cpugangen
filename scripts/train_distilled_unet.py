@@ -21,6 +21,7 @@ import os
 import sys
 import argparse
 from pathlib import Path
+from typing import Optional
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -318,9 +319,6 @@ def main():
     print("  3. Integrate with pipeline")
 
 
-# Import for type hints
-from typing import Optional
-
-
 if __name__ == "__main__":
     main()
+
