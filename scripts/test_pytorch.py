@@ -33,10 +33,10 @@ def main():
     print("🔥 PyTorch SDXL-Lightning Inference")
     print("=" * 60)
     
-    # Load model
+    # Load model (CPU only for fair comparison with ONNX)
     print(f"\n📦 Loading model: {args.model}")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if device == "cuda" else torch.float32
+    device = "cpu"
+    dtype = torch.float32
     
     load_start = time.time()
     pipe = StableDiffusionXLPipeline.from_pretrained(

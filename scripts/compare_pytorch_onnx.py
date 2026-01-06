@@ -112,9 +112,9 @@ def main():
     print("🔬 PyTorch vs ONNX Comparison & Benchmark")
     print("=" * 70)
     
-    # Run PyTorch generation
+    # Run PyTorch generation (CPU only)
     print("\n" + "=" * 70)
-    print("🔥 Running PyTorch inference...")
+    print("🔥 Running PyTorch inference (CPU)...")
     print("=" * 70)
     
     pytorch_output = output_dir / "pytorch"
@@ -133,9 +133,9 @@ def main():
     subprocess.run(pytorch_cmd, check=True)
     pytorch_total = time.time() - pytorch_start
     
-    # Run ONNX generation
+    # Run ONNX generation (CPU only)
     print("\n" + "=" * 70)
-    print("⚡ Running ONNX inference...")
+    print("⚡ Running ONNX inference (CPU)...")
     print("=" * 70)
     
     onnx_output = output_dir / "onnx"
@@ -148,6 +148,7 @@ def main():
         "--output", str(onnx_output),
         "--num-images", str(args.benchmark_runs),
         "--benchmark",
+        "--provider", "CPUExecutionProvider",  # Force CPU for fair comparison
     ]
     
     onnx_start = time.time()
