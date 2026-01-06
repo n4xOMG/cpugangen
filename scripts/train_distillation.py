@@ -189,7 +189,9 @@ def train_one_epoch(
     
     for step, batch in enumerate(progress_bar):
         # Get batch
-        pixel_values = batch['pixel_values'].to(device)
+        pixel_values = batch.get('pixel_values')
+        if pixel_values is not None:
+            pixel_values = pixel_values.to(device)
         prompts = batch['prompts']
         
         # Encode prompts
@@ -202,10 +204,15 @@ def train_one_epoch(
             device
         )
         
-        # Encode images to latents
-        with torch.no_grad():
-            latents = vae.encode(pixel_values).latent_dist.sample()
-            latents = latents * vae.config.scaling_factor
+        # Get latents (either from batch or encode on-the-fly)
+        if 'latents' in batch:
+            # Using cached latents
+            latents = batch['latents'].to(device)
+        else:
+            # Encode images to latents (original behavior)
+            with torch.no_grad():
+                latents = vae.encode(pixel_values).latent_dist.sample()
+                latents = latents * vae.config.scaling_factor
         
         # Sample noise
         noise = torch.randn_like(latents)
@@ -452,28 +459,53 @@ def main(args):
     print("Loading Dataset")
     print("="*60)
     
-    train_dataset = AnimeDistillationDataset(
-        metadata_path=config['data']['train_metadata'],
-        images_dir=config['data']['images_dir'],
-        resolution=config['data']['resolution'],
-        max_tags=config['data']['max_tags'],
-        min_tag_score=config['data']['min_tag_score']
-    )
     
-    val_dataset = AnimeDistillationDataset(
-        metadata_path=config['data']['val_metadata'],
-        images_dir=config['data']['images_dir'],
-        resolution=config['data']['resolution'],
-        max_tags=config['data']['max_tags'],
-        min_tag_score=config['data']['min_tag_score']
-    )
+    # Load datasets based on config
+    use_cached = config['data'].get('use_cached_latents', False)
+    
+    if use_cached:
+        print("Using cached latents (faster training)...")
+        from dataset_anime import CachedLatentDataset, collate_fn_cached
+        
+        train_dataset = CachedLatentDataset(
+            latent_metadata_path=config['data']['train_latent_metadata'],
+            latents_dir=config['data']['train_latents_dir'],
+            max_tags=config['data']['max_tags']
+        )
+        
+        val_dataset = CachedLatentDataset(
+            latent_metadata_path=config['data']['val_latent_metadata'],
+            latents_dir=config['data']['val_latents_dir'],
+            max_tags=config['data']['max_tags']
+        )
+        
+        batch_collate_fn = collate_fn_cached
+    else:
+        print("Using on-the-fly image encoding...")
+        train_dataset = AnimeDistillationDataset(
+            metadata_path=config['data']['train_metadata'],
+            images_dir=config['data']['images_dir'],
+            resolution=config['data']['resolution'],
+            max_tags=config['data']['max_tags'],
+            min_tag_score=config['data']['min_tag_score']
+        )
+        
+        val_dataset = AnimeDistillationDataset(
+            metadata_path=config['data']['val_metadata'],
+            images_dir=config['data']['images_dir'],
+            resolution=config['data']['resolution'],
+            max_tags=config['data']['max_tags'],
+            min_tag_score=config['data']['min_tag_score']
+        )
+        
+        batch_collate_fn = collate_fn
     
     train_loader = DataLoader(
         train_dataset,
         batch_size=config['training']['batch_size'],
         shuffle=True,
         num_workers=config['training']['num_workers'],
-        collate_fn=collate_fn,
+        collate_fn=batch_collate_fn,
         pin_memory=True
     )
     
@@ -482,7 +514,7 @@ def main(args):
         batch_size=config['training']['batch_size'],
         shuffle=False,
         num_workers=config['training']['num_workers'],
-        collate_fn=collate_fn,
+        collate_fn=batch_collate_fn,
         pin_memory=True
     )
     

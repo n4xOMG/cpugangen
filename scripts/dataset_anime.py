@@ -160,6 +160,134 @@ def collate_fn(batch: List[Dict]) -> Dict[str, any]:
     }
 
 
+class CachedLatentDataset(Dataset):
+    """
+    Dataset for loading pre-cached latents for distillation training.
+    
+    Much faster than encoding images on-the-fly.
+    """
+    
+    def __init__(
+        self,
+        latent_metadata_path: str,
+        latents_dir: str,
+        max_tags: int = 75,
+        use_caption: bool = True,
+        use_character_tags: bool = True
+    ):
+        """
+        Args:
+            latent_metadata_path: Path to latent metadata JSON
+            latents_dir: Directory containing cached .pt latents
+            max_tags: Maximum number of tags to use
+            use_caption: Whether to use caption field
+            use_character_tags: Whether to prepend character tags
+        """
+        self.latents_dir = Path(latents_dir)
+        self.max_tags = max_tags
+        self.use_caption = use_caption
+        self.use_character_tags = use_character_tags
+        
+        # Load latent metadata
+        print(f"Loading latent metadata from {latent_metadata_path}...")
+        with open(latent_metadata_path, 'r', encoding='utf-8') as f:
+            self.metadata = json.load(f)
+        
+        # Filter out missing latents
+        self.valid_samples = []
+        for item in self.metadata:
+            latent_filename = item.get('latent_filename')
+            if not latent_filename:
+                continue
+            
+            latent_path = self.latents_dir / latent_filename
+            if latent_path.exists():
+                self.valid_samples.append(item)
+            else:
+                print(f"Warning: Latent not found: {latent_path}")
+        
+        print(f"Loaded {len(self.valid_samples)} valid cached latents")
+    
+    def __len__(self) -> int:
+        return len(self.valid_samples)
+    
+    def _build_prompt(self, item: Dict) -> str:
+        """
+        Build prompt from metadata using tags and scores.
+        Same logic as AnimeDistillationDataset.
+        """
+        tags = []
+        
+        # Add character tags first (usually important)
+        if self.use_character_tags and item.get('character_tags'):
+            tags.extend(item['character_tags'])
+        
+        # Use caption or filtered general tags
+        if self.use_caption and item.get('caption'):
+            # Caption is already comma-separated string
+            caption_tags = [t.strip() for t in item['caption'].split(',')]
+            tags.extend(caption_tags)
+        elif item.get('general_scores'):
+            # Filter by score threshold (using default 0.35)
+            high_score_tags = [
+                score_item['tag'] 
+                for score_item in item['general_scores']
+                if score_item.get('score', 0) >= 0.35
+            ]
+            tags.extend(high_score_tags)
+        elif item.get('general_tags'):
+            # Fallback to all general tags
+            tags.extend(item['general_tags'])
+        
+        # Limit to max_tags
+        tags = tags[:self.max_tags]
+        
+        # Join with commas
+        prompt = ', '.join(tags)
+        
+        return prompt
+    
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """
+        Returns:
+            Dict with:
+                - latent: Pre-cached latent tensor (C, H, W)
+                - prompt: Text prompt string
+                - filename: Original filename
+        """
+        item = self.valid_samples[idx]
+        
+        # Load cached latent
+        latent_filename = item['latent_filename']
+        latent_path = self.latents_dir / latent_filename
+        latent = torch.load(latent_path)
+        
+        # Build prompt
+        prompt = self._build_prompt(item)
+        
+        return {
+            'latent': latent,
+            'prompt': prompt,
+            'filename': item.get('preprocessed_filename', item.get('filename'))
+        }
+
+
+def collate_fn_cached(batch: List[Dict]) -> Dict[str, any]:
+    """
+    Custom collate function for cached latent DataLoader.
+    """
+    latents = torch.stack([item['latent'] for item in batch])
+    prompts = [item['prompt'] for item in batch]
+    filenames = [item['filename'] for item in batch]
+    
+    return {
+        'latents': latents,
+        'prompts': prompts,
+        'filenames': filenames
+    }
+
+
+
 def create_train_val_split(
     metadata_path: str,
     output_dir: str,
