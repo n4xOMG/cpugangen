@@ -6,3 +6,5 @@ venv/
 *.zip
 outputs/
 data/tags.json
+checkpoints/
+onnx_models/
