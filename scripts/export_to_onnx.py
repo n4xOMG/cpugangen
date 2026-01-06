@@ -14,8 +14,15 @@ Supports:
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 import torch
+
+# Suppress expected ONNX export warnings
+warnings.filterwarnings("ignore", message=".*TracerWarning.*")
+warnings.filterwarnings("ignore", message=".*Constant folding.*")
+warnings.filterwarnings("ignore", message=".*will be ignored.*")
+warnings.filterwarnings("ignore", message=".*advanced indexing.*")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

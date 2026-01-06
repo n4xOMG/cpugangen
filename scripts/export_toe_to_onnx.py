@@ -100,9 +100,9 @@ def export_toe_pipeline_to_onnx(
     toe_onnx_path = output_dir / "toe_encoder"
     toe_onnx_path.mkdir(exist_ok=True)
     
-    # Prepare sample inputs for TOE
-    sample_tag_ids = torch.randint(0, 15000, (1, 20))
-    sample_tag_weights = torch.ones(1, 20)
+    # Prepare sample inputs for TOE (move to same device as model)
+    sample_tag_ids = torch.randint(0, 15000, (1, 20), device=device)
+    sample_tag_weights = torch.ones(1, 20, device=device)
     
     # Export TOE
     torch.onnx.export(
