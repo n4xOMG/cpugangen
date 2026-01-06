@@ -265,6 +265,8 @@ def create_toe_pipeline(
     device: str = "cuda",
     use_hybrid: bool = True,
     torch_dtype = None,  # Auto-detect based on device
+    enable_caching: bool = None,  # Auto: True for CPU, False for GPU
+    cache_size: int = 128,
 ):
     """
     Create SDXL pipeline with TOE text encoder.
@@ -279,6 +281,8 @@ def create_toe_pipeline(
         device: Device to use
         use_hybrid: Use hybrid mode (TOE context + CLIP pooled)
         torch_dtype: Data type for pipeline (None = auto: FP32 for CPU, FP16 for CUDA)
+        enable_caching: Enable deterministic operation caching (None = auto: True for CPU)
+        cache_size: Maximum cache size (number of entries)
         
     Returns:
         SDXL pipeline with TOE encoding (as monkey-patched method)
@@ -287,6 +291,11 @@ def create_toe_pipeline(
     if torch_dtype is None:
         torch_dtype = torch.float32 if device == "cpu" else torch.float16
         print(f"   Auto-selected dtype: {torch_dtype} for device={device}")
+    
+    # Auto-detect caching based on device
+    if enable_caching is None:
+        enable_caching = (device == "cpu")
+        print(f"   Auto-selected caching: {enable_caching} for device={device}")
     
     from hqpd.models.toe import TagOptimizedEncoder
     from hqpd.utils.danbooru import DanbooruTagProcessor
@@ -351,6 +360,17 @@ def create_toe_pipeline(
     pipeline.toe_model = toe_model
     pipeline.tag_processor = tag_processor
     pipeline.use_hybrid = use_hybrid
+    
+    # Store cache configuration
+    pipeline.enable_caching = enable_caching
+    pipeline.cache_size = cache_size
+    
+    # Initialize global cache if caching enabled
+    if enable_caching:
+        from hqpd.optimization import get_global_cache
+        cache = get_global_cache(max_size=cache_size, enabled=True)
+        print(f"\n   ✓ Deterministic caching enabled (cache size: {cache_size})")
+
     
     # Save original encode_prompt method
     pipeline._original_encode_prompt = pipeline.encode_prompt

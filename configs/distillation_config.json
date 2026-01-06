@@ -1,0 +1,43 @@
+{
+  "teacher": {
+    "model_id": "martineux/janku6",
+    "comment": "Illustrious anime model (teacher)"
+  },
+  "student": {
+    "model_id": "segmind/SSD-1B",
+    "comment": "SSD-1B architecture (student)"
+  },
+  "data": {
+    "train_metadata": "data/splits/train_metadata.json",
+    "val_metadata": "data/splits/val_metadata.json",
+    "images_dir": "data/images",
+    "resolution": 1024,
+    "max_tags": 75,
+    "min_tag_score": 0.35,
+    "comment": "Adjust paths to your dataset location"
+  },
+  "training": {
+    "num_epochs": 10,
+    "batch_size": 1,
+    "learning_rate": 1e-5,
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0,
+    "num_workers": 4,
+    "save_every": 2,
+    "output_dir": "checkpoints/anime_student",
+    "comment": "Batch size 1 for 3090 24GB. Increase if you have more VRAM."
+  },
+  "loss": {
+    "output_weight": 1.0,
+    "feature_weight": 0.5,
+    "attention_weight": 0.0,
+    "comment": "Feature weight helps student match teacher's intermediate representations"
+  },
+  "logging": {
+    "use_wandb": true,
+    "wandb_project": "anime-student-distillation",
+    "run_name": "ssd1b-illustrious-v1",
+    "log_every": 50,
+    "comment": "Set use_wandb to false if you don't want WandB logging"
+  }
+}
