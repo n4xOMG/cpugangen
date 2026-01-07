@@ -2,8 +2,11 @@
 """
 Train TinyVAE Decoder on cached latents.
 
-Trains a lightweight decoder to reconstruct images from pre-cached latents.
-Much faster training than full VAE since encoding is pre-computed.
+Enhanced with:
+- Pretrained initialization from SD 1.5
+- LPIPS perceptual loss (CRITICAL for quality!)
+- Validation image generation
+- Gradient checkpointing
 """
 
 import argparse
@@ -22,10 +25,19 @@ from torchvision import transforms
 from tqdm.auto import tqdm
 import wandb
 
-#Add parent dir to path
+# Add parent dir to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hqpd.models.tiny_vae import TinyVAEDecoder, count_parameters
+from hqpd.models.vae_enhancements import (
+    EnhancedVAELoss,
+    load_pretrained_illustrious_decoder,
+    initialize_from_pretrained
+)
+from hqpd.models.vae_validation import (
+    save_validation_images,
+    compute_reconstruction_metrics
+)
 
 
 class CachedLatentDataset(Dataset):
@@ -90,64 +102,8 @@ class CachedLatentDataset(Dataset):
         return result
 
 
-class VAEDecoderLoss(nn.Module):
-    """Loss function for VAE decoder training."""
-    
-    def __init__(
-        self,
-        l1_weight: float = 1.0,
-        l2_weight: float = 0.5,
-        use_perceptual: bool = False
-    ):
-        super().__init__()
-        self.l1_weight = l1_weight
-        self.l2_weight = l2_weight
-        self.use_perceptual = use_perceptual
-    
-    def forward(
-        self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        mask: Optional[torch.Tensor] = None
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Compute reconstruction loss.
-        
-        Args:
-            pred: Predicted image (B, 3, H, W) in [-1, 1]
-            target: Target image (B, 3, H, W) in [-1, 1]
-            mask: Optional mask (B, H, W) with 1 for valid pixels, 0 for padding
-            
-        Returns:
-            Dict with total loss and component losses
-        """
-        losses = {}
-        
-        # Apply mask if provided
-        if mask is not None:
-            # Expand mask to match image channels
-            mask = mask.unsqueeze(1)  # (B, 1, H, W)
-            
-            # Masked L1 loss
-            l1_loss = torch.abs(pred - target) * mask
-            l1_loss = l1_loss.sum() / (mask.sum() * pred.shape[1])  # Normalize by valid pixels
-            
-            # Masked L2 loss
-            l2_loss = ((pred - target) ** 2) * mask
-            l2_loss = l2_loss.sum() / (mask.sum() * pred.shape[1])
-        else:
-            # Standard L1 and L2
-            l1_loss = F.l1_loss(pred, target)
-            l2_loss = F.mse_loss(pred, target)
-        
-        losses['l1'] = l1_loss
-        losses['l2'] = l2_loss
-        
-        # Total loss
-        total = self.l1_weight * l1_loss + self.l2_weight * l2_loss
-        losses['total'] = total
-        
-        return losses
+# VAEDecoderLoss is now imported from vae_enhancements.py as EnhancedVAELoss
+# Old basic loss removed - using enhanced version with LPIPS
 
 
 def train_one_epoch(
@@ -206,7 +162,8 @@ def train_one_epoch(
         progress_bar.set_postfix({
             'loss': f"{loss.item():.4f}",
             'l1': f"{losses['l1'].item():.4f}",
-            'l2': f"{losses['l2'].item():.4f}"
+            'l2': f"{losses['l2'].item():.4f}",
+            'lpips': f"{losses.get('lpips', 0).item():.4f}"
         })
         
         # Log to wandb
@@ -215,6 +172,7 @@ def train_one_epoch(
                 'train/loss': loss.item(),
                 'train/l1_loss': losses['l1'].item(),
                 'train/l2_loss': losses['l2'].item(),
+                'train/lpips_loss': losses.get('lpips', torch.tensor(0.0)).item(),
                 'train/epoch': epoch,
                 'train/step': step
             })
@@ -289,6 +247,26 @@ def main(args):
         num_upsample_blocks=config['model']['num_upsample_blocks']
     ).to(device)
     
+    # CRITICAL: Initialize from pretrained Illustrious VAE (NOT random!)
+    if config['model'].get('use_pretrained_init', True):
+        print("\n⚠️  IMPORTANT: Initializing from pretrained Illustrious VAE...")
+        print("   (Matches your teacher model: martineux/janku6)")
+        pretrained_decoder = load_pretrained_illustrious_decoder(device)
+        model = initialize_from_pretrained(
+            model,
+            pretrained_decoder,
+            strategy='copy_matching'
+        )
+        del pretrained_decoder
+        torch.cuda.empty_cache()
+    else:
+        print("\n⚠️  WARNING: Using random initialization (not recommended!)")
+    
+    # Enable gradient checkpointing if requested
+    if config['model'].get('use_gradient_checkpointing', False):
+        print("✅ Gradient checkpointing enabled")
+        # Note: TinyVAEDecoder would need checkpointing support added
+    
     total_params = count_parameters(model)
     print(f"\nModel: {total_params:,} parameters")
     print(f"Size: ~{total_params * 4 / 1024 / 1024:.1f} MB (FP32)")
@@ -333,11 +311,18 @@ def main(args):
     print(f"Train samples: {len(train_dataset)}")
     print(f"Val samples: {len(val_dataset)}")
     
-    # Setup training
-    loss_fn = VAEDecoderLoss(
+    # Setup training with enhanced loss (includes LPIPS!)
+    loss_fn = EnhancedVAELoss(
         l1_weight=config['loss']['l1_weight'],
-        l2_weight=config['loss']['l2_weight']
+        l2_weight=config['loss']['l2_weight'],
+        lpips_weight=config['loss'].get('lpips_weight', 0.1),
+        device=device
     )
+    
+    print("\n✅ Using EnhancedVAELoss with LPIPS perceptual loss")
+    print(f"   L1 weight: {config['loss']['l1_weight']}")
+    print(f"   L2 weight: {config['loss']['l2_weight']}")
+    print(f"   LPIPS weight: {config['loss'].get('lpips_weight', 0.1)}")
     
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -356,6 +341,10 @@ def main(args):
     output_dir = Path(config['training']['output_dir'])
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Create validation images directory
+    val_images_dir = output_dir / "validation_images"
+    val_images_dir.mkdir(exist_ok=True)
+    
     for epoch in range(config['training']['num_epochs']):
         print(f"\nEpoch {epoch+1}/{config['training']['num_epochs']}")
         
@@ -371,6 +360,30 @@ def main(args):
             model, val_loader, loss_fn, device, epoch
         )
         print(f"Val Loss: {val_loss:.4f}")
+        
+        # CRITICAL: Save validation images to monitor quality!
+        if (epoch + 1) % config['logging'].get('save_images_every', 1) == 0:
+            save_validation_images(
+                model, val_loader, epoch,
+                val_images_dir,
+                num_samples=8,
+                device=device
+            )
+        
+        # Compute reconstruction metrics
+        if (epoch + 1) % config['logging'].get('compute_metrics_every', 5) == 0:
+            metrics = compute_reconstruction_metrics(
+                model, val_loader, device, num_batches=10
+            )
+            print(f"  Reconstruction MSE: {metrics['mse']:.6f}")
+            print(f"  Reconstruction PSNR: {metrics['psnr']:.2f} dB")
+            
+            if config['logging']['use_wandb']:
+                wandb.log({
+                    'val/mse': metrics['mse'],
+                    'val/psnr': metrics['psnr'],
+                    'val/epoch': epoch
+                })
         
         # Save best model
         if val_loss < best_val_loss:

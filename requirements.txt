@@ -1,12 +1,21 @@
+# Core dependencies
 torch>=2.0.0
 torchvision>=0.15.0
-diffusers>=0.25.0
-transformers>=4.35.0
+diffusers>=0.26.0
+transformers>=4.36.0
 accelerate>=0.25.0
-datasets>=2.14.0
+safetensors>=0.4.1
+
+# Training
 wandb>=0.16.0
-pillow>=10.0.0
-pyyaml>=6.0
+
+# CRITICAL: LPIPS perceptual loss (required for VAE training!)
+lpips>=0.1.4
+
+# Image processing
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# Utilities
 tqdm>=4.66.0
-safetensors>=0.4.0
-ijson>=3.2.0
+numpy>=1.24.0

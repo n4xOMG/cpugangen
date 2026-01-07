@@ -3,7 +3,9 @@
     "base_channels": 64,
     "max_channels": 256,
     "num_upsample_blocks": 3,
-    "comment": "Lightweight decoder: ~2-5M params vs 49M in SDXL VAE"
+    "use_pretrained_init": true,
+    "use_gradient_checkpointing": false,
+    "comment": "IMPORTANT: use_pretrained_init=true initializes from Illustrious VAE (matches teacher model!)"
   },
   "data": {
     "train_latent_metadata": "data/cached_latents/train/latent_metadata.json",
@@ -20,24 +22,27 @@
   "training": {
     "num_epochs": 20,
     "batch_size": 8,
-    "learning_rate": 1e-4,
+    "learning_rate": 5e-5,
     "weight_decay": 0.01,
     "max_grad_norm": 1.0,
     "num_workers": 4,
     "save_every": 5,
     "output_dir": "checkpoints/tiny_vae",
-    "comment": "Batch size 8 should work on 24GB GPU. Adjust as needed."
+    "comment": "CRITICAL: Use low LR (5e-5) for fine-tuning from pretrained. Batch size 8 for 24GB GPU."
   },
   "loss": {
     "l1_weight": 1.0,
     "l2_weight": 0.5,
-    "use_perceptual": false,
-    "comment": "L1 for sharpness, L2 for smoothness. Perceptual loss optional (requires VGG)."
+    "lpips_weight": 0.1,
+    "comment": "CRITICAL: LPIPS perceptual loss (0.1 weight) prevents blurry reconstructions!"
   },
   "logging": {
     "use_wandb": true,
     "wandb_project": "tiny-vae-training",
-    "run_name": "tinyvae-anime-v1",
-    "log_every": 50
+    "run_name": "tinyvae-anime-v1-pretrained",
+    "log_every": 50,
+    "save_images_every": 1,
+    "compute_metrics_every": 5,
+    "comment": "Save validation images every epoch to monitor quality visually!"
   }
 }
