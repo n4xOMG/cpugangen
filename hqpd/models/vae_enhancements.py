@@ -15,6 +15,7 @@ class EnhancedVAELoss(nn.Module):
     Enhanced loss with L1, L2, and LPIPS perceptual loss.
     
     CRITICAL: LPIPS loss is essential for maintaining perceptual quality!
+    Downsamples to 256x256 for LPIPS to save VRAM.
     """
     
     def __init__(
@@ -22,12 +23,14 @@ class EnhancedVAELoss(nn.Module):
         l1_weight: float = 1.0,
         l2_weight: float = 0.5,
         lpips_weight: float = 0.1,  # Critical for quality
+        lpips_size: int = 256,  # Downsample for memory efficiency
         device: str = 'cuda'
     ):
         super().__init__()
         self.l1_weight = l1_weight
         self.l2_weight = l2_weight
         self.lpips_weight = lpips_weight
+        self.lpips_size = lpips_size
         
         # Initialize LPIPS (perceptual loss)
         # Uses pretrained VGG network to compare feature representations
@@ -73,17 +76,22 @@ class EnhancedVAELoss(nn.Module):
         losses['l2'] = l2_loss
         
         # LPIPS perceptual loss (CRITICAL for quality)
-        # Compares high-level features, not just pixels
-        # This prevents "blurry" reconstructions
-        with torch.cuda.amp.autocast(enabled=False):
+        # Downsample to lpips_size to save VRAM (256x256 works well)
+        with torch.no_grad():
+            # Downsample for memory efficiency
+            pred_small = torch.nn.functional.interpolate(
+                pred, size=(self.lpips_size, self.lpips_size),
+                mode='bilinear', align_corners=False
+            )
+            target_small = torch.nn.functional.interpolate(
+                target, size=(self.lpips_size, self.lpips_size),
+                mode='bilinear', align_corners=False
+            )
+        
+        with torch.amp.autocast('cuda', enabled=False):
             # LPIPS expects float32, not float16
-            pred_fp32 = pred.float()
-            target_fp32 = target.float()
-            
-            # If mask provided, zero out padded regions
-            if mask is not None:
-                pred_fp32 = pred_fp32 * mask
-                target_fp32 = target_fp32 * mask
+            pred_fp32 = pred_small.float()
+            target_fp32 = target_small.float()
             
             lpips_loss = self.lpips_fn(pred_fp32, target_fp32).mean()
         
