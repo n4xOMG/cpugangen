@@ -10,14 +10,14 @@
   "data": {
     "train_latent_metadata": "data/cached_latents/train/latent_metadata.json",
     "train_latents_dir": "data/cached_latents/train/latents",
-    "train_images_dir": "data/processed_images/train",
+    "train_images_dir": "data/processed_images",
     "train_masks_dir": null,
     "val_latent_metadata": "data/cached_latents/val/latent_metadata.json",
     "val_latents_dir": "data/cached_latents/val/latents",
-    "val_images_dir": "data/processed_images/val",
+    "val_images_dir": "data/processed_images",
     "val_masks_dir": null,
     "resolution": 1024,
-    "comment": "Set masks_dir if using pad strategy. Leave null otherwise."
+    "comment": "Images are in flat processed_images dir. Latent metadata maps filenames."
   },
   "training": {
     "num_epochs": 20,
