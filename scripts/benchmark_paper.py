@@ -7,6 +7,8 @@ Tests all optimization configurations for research paper comparison:
 - Baseline B: Illustrious + SDXL-Lightning (4 steps)
 - Baseline C: Illustrious + SSD-1B UNet + SDXL-Lightning (hybrid)
 - Baseline D: Illustrious + SSD-1B UNet + SDXL-Lightning + Caching (full)
+- Baseline E: Baseline C + TAESD VAE (tiny VAE decoder)
+- Baseline F: Baseline D + TAESD VAE (full optimization + tiny VAE)
 
 Usage:
     python scripts/benchmark_paper.py \\
@@ -26,7 +28,7 @@ import statistics
 import torch
 import psutil
 import numpy as np
-from diffusers import StableDiffusionXLPipeline, UNet2DConditionModel, EulerDiscreteScheduler
+from diffusers import StableDiffusionXLPipeline, UNet2DConditionModel, EulerDiscreteScheduler, AutoencoderTiny
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 
@@ -334,6 +336,133 @@ def load_baseline_d() -> StableDiffusionXLPipeline:
     return pipeline
 
 
+def load_baseline_e() -> StableDiffusionXLPipeline:
+    """Baseline E: Hybrid + TAESD (SSD-1B UNet + Lightning + Tiny VAE)."""
+    print("Loading Baseline E: Hybrid + TAESD VAE...")
+    
+    # Load base
+    pipeline = StableDiffusionXLPipeline.from_pretrained(
+        "martineux/janku6",
+        torch_dtype=torch.float32,
+    )
+    
+    # Replace UNet with SSD-1B
+    print("  Loading SSD-1B UNet...")
+    try:
+        ssd1b_unet = UNet2DConditionModel.from_pretrained(
+            "segmind/SSD-1B",
+            subfolder="unet",
+            torch_dtype=torch.float32,
+        )
+    except Exception:
+        ssd1b_pipe = StableDiffusionXLPipeline.from_pretrained(
+            "segmind/SSD-1B",
+            torch_dtype=torch.float32,
+        )
+        ssd1b_unet = ssd1b_pipe.unet
+        del ssd1b_pipe
+        clear_memory()
+    
+    pipeline.unet = ssd1b_unet
+    print("  ✓ UNet replaced with SSD-1B")
+    
+    # Replace VAE with TAESD
+    print("  Loading TAESD VAE...")
+    taesd = AutoencoderTiny.from_pretrained(
+        "madebyollin/taesdxl",
+        torch_dtype=torch.float32,
+    )
+    pipeline.vae = taesd
+    print("  ✓ VAE replaced with TAESD")
+    
+    # Apply Lightning LoRA
+    ckpt = hf_hub_download("ByteDance/SDXL-Lightning", "sdxl_lightning_4step_lora.safetensors")
+    pipeline.load_lora_weights(load_file(ckpt))
+    
+    # Configure scheduler
+    pipeline.scheduler = EulerDiscreteScheduler.from_config(
+        pipeline.scheduler.config,
+        timestep_spacing="trailing",
+        prediction_type="epsilon",
+    )
+    
+    pipeline.fuse_lora()
+    pipeline.unload_lora_weights()
+    
+    pipeline = pipeline.to("cpu")
+    
+    print("  ✓ Hybrid + TAESD pipeline loaded")
+    return pipeline
+
+
+def load_baseline_f() -> StableDiffusionXLPipeline:
+    """Baseline F: Full Optimization + TAESD (SSD-1B + Lightning + Caching + Tiny VAE)."""
+    print("Loading Baseline F: Full Optimization + TAESD VAE...")
+    
+    # Initialize cache
+    cache = get_global_cache(max_size=256, enabled=True)
+    print("  ✓ Cache initialized (256 entries)")
+    
+    # Load base
+    pipeline = StableDiffusionXLPipeline.from_pretrained(
+        "martineux/janku6",
+        torch_dtype=torch.float32,
+    )
+    
+    # Replace UNet with SSD-1B
+    print("  Loading SSD-1B UNet...")
+    try:
+        ssd1b_unet = UNet2DConditionModel.from_pretrained(
+            "segmind/SSD-1B",
+            subfolder="unet",
+            torch_dtype=torch.float32,
+        )
+    except Exception:
+        ssd1b_pipe = StableDiffusionXLPipeline.from_pretrained(
+            "segmind/SSD-1B",
+            torch_dtype=torch.float32,
+        )
+        ssd1b_unet = ssd1b_pipe.unet
+        del ssd1b_pipe
+        clear_memory()
+    
+    pipeline.unet = ssd1b_unet
+    print("  ✓ UNet replaced with SSD-1B")
+    
+    # Replace VAE with TAESD
+    print("  Loading TAESD VAE...")
+    taesd = AutoencoderTiny.from_pretrained(
+        "madebyollin/taesdxl",
+        torch_dtype=torch.float32,
+    )
+    pipeline.vae = taesd
+    print("  ✓ VAE replaced with TAESD (~5MB vs ~168MB)")
+    
+    # Apply Lightning LoRA
+    ckpt = hf_hub_download("ByteDance/SDXL-Lightning", "sdxl_lightning_4step_lora.safetensors")
+    pipeline.load_lora_weights(load_file(ckpt))
+    
+    # Configure scheduler
+    pipeline.scheduler = EulerDiscreteScheduler.from_config(
+        pipeline.scheduler.config,
+        timestep_spacing="trailing",
+        prediction_type="epsilon",
+    )
+    
+    pipeline.fuse_lora()
+    pipeline.unload_lora_weights()
+    
+    pipeline = pipeline.to("cpu")
+    
+    # Attach cache context
+    cache_ctx = CacheContext(enabled=True, max_size=256, clear_on_enter=True, print_stats_on_exit=False)
+    cache_ctx.__enter__()
+    pipeline._cache_context = cache_ctx
+    
+    print("  ✓ Full optimization + TAESD pipeline loaded")
+    return pipeline
+
+
 def create_comparison_table(results: List[Dict[str, Any]], output_dir: Path):
     """Create publication-ready comparison table."""
     
@@ -476,6 +605,28 @@ def main():
         warmup=1,
     )
     results.append(result_d)
+    
+    # Baseline E: Hybrid + TAESD VAE
+    result_e = benchmark_configuration(
+        config_name="Baseline E: Hybrid + TAESD VAE",
+        load_fn=load_baseline_e,
+        prompts=prompts,
+        num_steps=4,
+        guidance_scale=0.0,
+        warmup=1,
+    )
+    results.append(result_e)
+    
+    # Baseline F: Full Optimization + TAESD VAE
+    result_f = benchmark_configuration(
+        config_name="Baseline F: Full Opt + TAESD VAE",
+        load_fn=load_baseline_f,
+        prompts=prompts,
+        num_steps=4,
+        guidance_scale=0.0,
+        warmup=1,
+    )
+    results.append(result_f)
     
     # Save raw results
     results_path = output_dir / "benchmark_results.json"
