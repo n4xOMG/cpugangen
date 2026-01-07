@@ -52,8 +52,24 @@ class ImageDataset(Dataset):
         return {
             'pixel_values': pixel_values,
             'filename': filename,
-            'metadata': item
+            'metadata': item  # Keep as single dict, not batched
         }
+
+
+def custom_collate_fn(batch):
+    """Custom collate that handles varying metadata structures."""
+    # Stack only the pixel_values tensor
+    pixel_values = torch.stack([item['pixel_values'] for item in batch])
+    
+    # Keep filenames and metadata as lists (don't try to collate dicts)
+    filenames = [item['filename'] for item in batch]
+    metadata_list = [item['metadata'] for item in batch]
+    
+    return {
+        'pixel_values': pixel_values,
+        'filename': filenames,
+        'metadata': metadata_list
+    }
 
 
 def cache_latents(
@@ -108,14 +124,15 @@ def cache_latents(
     
     print(f"✅ VAE loaded: {sum(p.numel() for p in vae.parameters()):,} parameters")
     
-    # Create dataset and loader
+    # Create dataset and loader with custom collate function
     dataset = ImageDataset(metadata, images_dir)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=2,
-        pin_memory=(device == 'cuda')
+        pin_memory=(device == 'cuda'),
+        collate_fn=custom_collate_fn  # Use custom collate to handle varying metadata
     )
     
     # Cache latents
@@ -129,7 +146,7 @@ def cache_latents(
         for batch in tqdm(dataloader, desc="Encoding"):
             pixel_values = batch['pixel_values'].to(device)
             filenames = batch['filename']
-            batch_metadata = batch['metadata']
+            batch_metadata = batch['metadata']  # Now a list of dicts
             
             # Encode to latents
             latent_dist = vae.encode(pixel_values).latent_dist
@@ -147,32 +164,13 @@ def cache_latents(
                 # Save latent tensor
                 torch.save(latent, latent_path)
                 
-                # Update metadata
-                item_metadata = {k: v for k, v in batch_metadata.items()}
-                # Handle tensors/iterables in metadata
-                for key in item_metadata:
-                    if isinstance(item_metadata[key], torch.Tensor):
-                        item_metadata[key] = item_metadata[key].tolist()
-                    elif isinstance(item_metadata[key], (list, tuple)):
-                        try:
-                            # Try to convert to simple list
-                            item_metadata[key] = [x.tolist() if isinstance(x, torch.Tensor) else x for x in item_metadata[key]]
-                        except:
-                            pass
+                # Get metadata for this item (already a dict)
+                item_metadata = batch_metadata[i].copy()
+                item_metadata['latent_filename'] = latent_filename
+                item_metadata['latent_path'] = str(latent_path)
+                item_metadata['latent_shape'] = list(latent.shape)
                 
-                # Get the i-th item from each list in batch_metadata
-                single_item = {}
-                for key, value in batch_metadata.items():
-                    if isinstance(value, list) and len(value) > i:
-                        single_item[key] = value[i]
-                    else:
-                        single_item[key] = value
-                
-                single_item['latent_filename'] = latent_filename
-                single_item['latent_path'] = str(latent_path)
-                single_item['latent_shape'] = list(latent.shape)
-                
-                latent_metadata.append(single_item)
+                latent_metadata.append(item_metadata)
     
     # Save latent metadata
     latent_metadata_path = output_dir / "latent_metadata.json"
