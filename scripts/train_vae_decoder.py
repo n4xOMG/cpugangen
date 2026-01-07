@@ -276,11 +276,15 @@ def main(args):
     print("Loading Datasets")
     print("="*60)
     
+    # Handle optional masks_dir (None if not using pad strategy)
+    train_masks_path = config['data'].get('train_masks_dir')
+    val_masks_path = config['data'].get('val_masks_dir')
+    
     train_dataset = CachedLatentDataset(
         latent_metadata_path=Path(config['data']['train_latent_metadata']),
         latents_dir=Path(config['data']['train_latents_dir']),
         images_dir=Path(config['data']['train_images_dir']),
-        masks_dir=Path(config['data'].get('train_masks_dir')),
+        masks_dir=Path(train_masks_path) if train_masks_path else None,
         resolution=config['data']['resolution']
     )
     
@@ -288,7 +292,7 @@ def main(args):
         latent_metadata_path=Path(config['data']['val_latent_metadata']),
         latents_dir=Path(config['data']['val_latents_dir']),
         images_dir=Path(config['data']['val_images_dir']),
-        masks_dir=Path(config['data'].get('val_masks_dir')),
+        masks_dir=Path(val_masks_path) if val_masks_path else None,
         resolution=config['data']['resolution']
     )
     
