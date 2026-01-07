@@ -29,9 +29,11 @@ class ImageDataset(Dataset):
         self.images_dir = images_dir
         self.resolution = resolution
         
-        # Transform: to tensor and normalize
+        # Transform: resize, crop to exact size, to tensor and normalize
+        # CenterCrop ensures ALL images are exactly resolution x resolution
         self.transform = transforms.Compose([
             transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(resolution),  # Ensure exact square size
             transforms.ToTensor(),
             transforms.Normalize([0.5], [0.5])  # [-1, 1]
         ])

@@ -8,7 +8,7 @@ Generates statistics and bucket classification to inform preprocessing strategy.
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 from collections import defaultdict
 import sys
 

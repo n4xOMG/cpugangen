@@ -7,14 +7,19 @@ Implements 4 strategies:
 2. Smart cropping with anime face detection
 3. Resize & pad (composition-preserving)
 4. Multi-tile training (for extreme aspect ratios)
+
+Optimized with parallel processing for CPU efficiency.
 """
 
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import sys
 from tqdm.auto import tqdm
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
 
 from PIL import Image
 import torch
@@ -30,6 +35,92 @@ from hqpd.utils.image_processing import (
     resize_and_pad,
     create_tiles
 )
+
+
+# Default number of workers (use 75% of CPU cores for efficiency)
+DEFAULT_WORKERS = max(1, int(mp.cpu_count() * 0.75))
+
+
+def process_single_smart_crop(args: Tuple) -> Optional[Dict]:
+    """Worker function for parallel smart crop processing."""
+    item, images_dir, output_dir, target_size, cascade_path = args
+    
+    try:
+        filename = item.get('filename')
+        img_path = images_dir / filename
+        
+        if not img_path.exists():
+            return None
+        
+        # Load image
+        image = Image.open(img_path).convert('RGB')
+        ratio = calculate_aspect_ratio(img_path)
+        
+        # Smart crop
+        cropped, crop_metadata = smart_crop_with_face(
+            image,
+            target_size,
+            cascade_path
+        )
+        
+        # Save
+        output_path = output_dir / filename
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cropped.save(output_path, quality=95)
+        
+        # Update metadata
+        new_item = item.copy()
+        new_item.update({
+            'preprocessed_filename': filename,
+            'strategy': 'smart_crop',
+            'original_ratio': ratio,
+            'crop_metadata': crop_metadata
+        })
+        return new_item
+        
+    except Exception as e:
+        print(f"\nError processing {item.get('filename')}: {e}")
+        return None
+
+
+def process_single_selective(args: Tuple) -> Optional[Dict]:
+    """Worker function for parallel selective processing."""
+    item, images_dir, output_dir, target_size, min_ratio, max_ratio = args
+    
+    try:
+        filename = item.get('filename')
+        img_path = images_dir / filename
+        
+        if not img_path.exists():
+            return None
+        
+        ratio = calculate_aspect_ratio(img_path)
+        
+        # Filter by ratio
+        if not (min_ratio <= ratio <= max_ratio):
+            return None
+        
+        # Load and crop
+        image = Image.open(img_path).convert('RGB')
+        cropped = center_crop(image, target_size)
+        
+        # Save
+        output_path = output_dir / filename
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cropped.save(output_path, quality=95)
+        
+        new_item = item.copy()
+        new_item.update({
+            'preprocessed_filename': filename,
+            'strategy': 'selective',
+            'original_ratio': ratio,
+            'crop_type': 'center'
+        })
+        return new_item
+        
+    except Exception as e:
+        print(f"\nError processing {item.get('filename')}: {e}")
+        return None
 
 
 def preprocess_selective(
@@ -99,66 +190,51 @@ def preprocess_smart_crop(
     images_dir: Path,
     output_dir: Path,
     target_size: int,
-    cascade_path: Path
+    cascade_path: Path,
+    num_workers: int = DEFAULT_WORKERS
 ) -> List[Dict]:
     """
     Strategy 2: Smart cropping with anime face detection.
+    Parallelized for CPU efficiency.
     """
     print("\n" + "="*60)
-    print("Strategy 2: Smart Cropping (Face Detection)")
+    print("Strategy 2: Smart Cropping (Face Detection) - PARALLEL")
     print("="*60)
     print(f"Cascade: {cascade_path}")
+    print(f"Workers: {num_workers} (CPU cores: {mp.cpu_count()})")
     
     if not cascade_path.exists():
         print(f"\n❌ Cascade not found: {cascade_path}")
         print("Run: python scripts/download_animeface_detector.py")
         return []
     
+    # Prepare args for parallel processing
+    work_items = [
+        (item, images_dir, output_dir, target_size, cascade_path)
+        for item in metadata
+    ]
+    
     processed_metadata = []
     face_detected_count = 0
     fallback_count = 0
     
-    for item in tqdm(metadata, desc="Processing"):
-        filename = item.get('filename')
-        img_path = images_dir / filename
+    # Process in parallel
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(process_single_smart_crop, args): args for args in work_items}
         
-        if not img_path.exists():
-            continue
-        
-        # Load image
-        image = Image.open(img_path).convert('RGB')
-        ratio = calculate_aspect_ratio(img_path)
-        
-        # Smart crop
-        cropped, crop_metadata = smart_crop_with_face(
-            image,
-            target_size,
-            cascade_path
-        )
-        
-        if crop_metadata and crop_metadata.get('face_detected'):
-            face_detected_count += 1
-        else:
-            fallback_count += 1
-        
-        # Save
-        output_path = output_dir / filename
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        cropped.save(output_path, quality=95)
-        
-        # Update metadata
-        new_item = item.copy()
-        new_item.update({
-            'preprocessed_filename': filename,
-            'strategy': 'smart_crop',
-            'original_ratio': ratio,
-            'crop_metadata': crop_metadata
-        })
-        processed_metadata.append(new_item)
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing"):
+            result = future.result()
+            if result is not None:
+                processed_metadata.append(result)
+                if result.get('crop_metadata', {}).get('face_detected'):
+                    face_detected_count += 1
+                else:
+                    fallback_count += 1
     
     print(f"\nProcessed: {len(processed_metadata)}")
-    print(f"Face detected: {face_detected_count} ({face_detected_count/len(processed_metadata)*100:.1f}%)")
-    print(f"Fallback (center crop): {fallback_count} ({fallback_count/len(processed_metadata)*100:.1f}%)")
+    if len(processed_metadata) > 0:
+        print(f"Face detected: {face_detected_count} ({face_detected_count/len(processed_metadata)*100:.1f}%)")
+        print(f"Fallback (center crop): {fallback_count} ({fallback_count/len(processed_metadata)*100:.1f}%)")
     
     return processed_metadata
 
@@ -364,6 +440,12 @@ def main():
         default=128,
         help='Tile overlap for multitile strategy (default: 128)'
     )
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f'Number of parallel workers (default: {DEFAULT_WORKERS}, 75%% of CPU cores)'
+    )
     
     args = parser.parse_args()
     
@@ -418,7 +500,8 @@ def main():
             images_dir,
             output_dir,
             args.target_size,
-            cascade_path
+            cascade_path,
+            args.workers
         )
     
     elif args.strategy == 'pad':
@@ -443,8 +526,21 @@ def main():
     
     # Save processed metadata
     output_metadata_path = output_dir / "metadata.json"
+    
+    # Custom encoder for numpy types (OpenCV returns int32/int64)
+    import numpy as np
+    class NumpyEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, (np.integer,)):
+                return int(obj)
+            if isinstance(obj, (np.floating,)):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return super().default(obj)
+    
     with open(output_metadata_path, 'w', encoding='utf-8') as f:
-        json.dump(processed_metadata, f, indent=2, ensure_ascii=False)
+        json.dump(processed_metadata, f, indent=2, ensure_ascii=False, cls=NumpyEncoder)
     
     print("\n" + "="*60)
     print("✅ Preprocessing Complete!")

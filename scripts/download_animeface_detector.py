@@ -12,7 +12,7 @@ import hashlib
 
 
 CASCADE_URL = "https://raw.githubusercontent.com/nagadomi/lbpcascade_animeface/master/lbpcascade_animeface.xml"
-EXPECTED_MD5 = "6c4de1b80e9c85a1df5f9030e114f1f2"  # Known MD5 hash for verification
+EXPECTED_MD5 = "8a6f87c7d9ea6b5f6d1b0a553ef93a18"  # Updated MD5 hash (file was updated on GitHub)
 
 
 def download_file(url: str, output_path: Path) -> bool:
