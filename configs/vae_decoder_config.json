@@ -3,7 +3,7 @@
     "base_channels": 64,
     "max_channels": 256,
     "num_upsample_blocks": 3,
-    "use_pretrained_init": true,
+    "use_pretrained_init": false,
     "use_gradient_checkpointing": false,
     "comment": "IMPORTANT: use_pretrained_init=true initializes from Illustrious VAE (matches teacher model!)"
   },
