@@ -4,8 +4,8 @@
     "max_channels": 256,
     "num_upsample_blocks": 3,
     "use_pretrained_init": false,
-    "use_gradient_checkpointing": false,
-    "comment": "IMPORTANT: use_pretrained_init=true initializes from Illustrious VAE (matches teacher model!)"
+    "use_gradient_checkpointing": true,
+    "comment": "gradient_checkpointing=true saves VRAM at cost of speed"
   },
   "data": {
     "train_latent_metadata": "data/cached_latents/train/latent_metadata.json",
@@ -21,14 +21,14 @@
   },
   "training": {
     "num_epochs": 20,
-    "batch_size": 8,
+    "batch_size": 2,
     "learning_rate": 5e-5,
     "weight_decay": 0.01,
     "max_grad_norm": 1.0,
     "num_workers": 4,
     "save_every": 5,
     "output_dir": "checkpoints/tiny_vae",
-    "comment": "CRITICAL: Use low LR (5e-5) for fine-tuning from pretrained. Batch size 8 for 24GB GPU."
+    "comment": "batch_size=2 for 24GB GPU with LPIPS. Use 4 if OOM still occurs."
   },
   "loss": {
     "l1_weight": 1.0,
