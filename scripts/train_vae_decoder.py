@@ -111,7 +111,7 @@ def train_one_epoch(
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     scaler: GradScaler,
-    loss_fn: VAEDecoderLoss,
+    loss_fn: EnhancedVAELoss,
     device: torch.device,
     epoch: int,
     config: Dict
@@ -184,7 +184,7 @@ def train_one_epoch(
 def validate(
     model: TinyVAEDecoder,
     dataloader: DataLoader,
-    loss_fn: VAEDecoderLoss,
+    loss_fn: EnhancedVAELoss,
     device: torch.device,
     epoch: int
 ) -> float:
