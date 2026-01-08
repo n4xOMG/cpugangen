@@ -127,8 +127,8 @@ class StructuredInitializer(nn.Module):
             align_corners=False,
         )
         
-        # Optional refinement
-        structure = structure + self.refine(structure) * 0.1
+        # Optional refinement - DISABLED: may be blocking learning
+        # structure = structure + self.refine(structure) * 0.1
         
         # Denormalize to original delta scale
         if use_normalization and self.delta_std.sum() > 0:
@@ -329,12 +329,14 @@ class StructuredInitTrainer:
         # Loss on normalized delta
         loss_delta = F.mse_loss(predicted_delta_norm, target_delta_norm)
         
-        # Optional: low-frequency delta loss for stability
-        target_delta_lowfreq = gaussian_blur_2d(target_delta_norm, self.blur_sigma)
-        pred_delta_lowfreq = gaussian_blur_2d(predicted_delta_norm, self.blur_sigma)
-        loss_lowfreq = F.mse_loss(pred_delta_lowfreq, target_delta_lowfreq)
+        # Simplified: use pure MSE loss (no low-freq weighting)
+        loss = loss_delta
         
-        loss = loss_delta + 0.5 * loss_lowfreq
+        # Optional: low-frequency delta loss for stability (DISABLED - was confusing training)
+        # target_delta_lowfreq = gaussian_blur_2d(target_delta_norm, self.blur_sigma)
+        # pred_delta_lowfreq = gaussian_blur_2d(predicted_delta_norm, self.blur_sigma)
+        # loss_lowfreq = F.mse_loss(pred_delta_lowfreq, target_delta_lowfreq)
+        # loss = loss_delta + 0.5 * loss_lowfreq
         
         # Backward pass
         self.optimizer.zero_grad()
@@ -345,7 +347,6 @@ class StructuredInitTrainer:
         return {
             "loss": loss.item(),
             "loss_delta": loss_delta.item(),
-            "loss_lowfreq": loss_lowfreq.item(),
             "pred_std": predicted_delta_norm.std().item(),
             "target_std": target_delta_norm.std().item(),
             "grad_norm": grad_norm.item(),
