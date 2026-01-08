@@ -630,15 +630,66 @@ cpugangen/
 - **Implementation**: 1,450+ lines of optimization code
 - **Status**: Production-ready, awaiting full benchmark validation
 
-### 🚧 Phase 4: Anime-Specialized Training (In Progress)
-- Collecting 35k anime images
-- Training: ~25-30 hours on RTX 3090
-- Goal: Anime-specialized student with maintained speedup
+---
 
-### ❌ Failed Approaches (Documented)
-1. **INT8 Quantization** - Fundamentally broken for diffusion (<40% quality)
-2. **ONNX Export** - Insufficient performance (~1.2x only)
-3. **Naive Step Reduction** - Quality degrades below 4 steps
+## 🧪 Optimization Hypotheses Tested
+
+### ❌ H9: Speculative Parallel Denoising
+- **Idea**: Run multiple UNet steps in parallel with trajectory prediction
+- **Result**: 30% SLOWER (not faster!)
+- **Why it failed**: 
+  - Diffusion models are fundamentally sequential
+  - Speculative execution caused CPU contention
+  - 0% speculation hit rate (predictions always wrong)
+- **Lesson**: Diffusion paradigm incompatible with speculative execution
+
+### ❌ H10: Learned Structured Initialization  
+- **Idea**: Train small network to predict "smart" starting latent from prompt
+- **Goal**: Reduce 4-step → 3-step by starting closer to target
+- **Result**: Training never converged (loss stayed at ~109)
+- **Why it failed**:
+  - Network (1.3M params) cannot predict 16K-dim latent from 1280-dim embedding
+  - Prediction depends on specific random noise, not learnable
+  - Blind prediction impossible without seeing current state
+- **Lesson**: Small networks can't learn high-dimensional mappings blindly
+
+### 🚧 H-D: Universal Trajectory Prior (In Progress)
+- **Idea**: Train meta-predictor that learns universal anime denoising patterns
+- **Key difference from H10**: Predictor sees `z_t` (current latent state), not just prompt
+- **Architecture**:
+  ```
+  Input: z_t (4×64×64) + timestep → ConvNet (~5M params) → predicted_noise
+  ```
+- **Inference strategy**:
+  1. Predictor makes fast "universal guess" (domain-specific prior)
+  2. UNet acts as "corrector" for prompt-specific details
+  3. Use predictor for some steps, UNet for others → 30-50% speedup target
+
+**Files Created**:
+- `hqpd/optimization/trajectory_prior.py` - TrajectoryPredictor model
+- `scripts/collect_trajectory_data.py` - Data collection
+- `scripts/train_trajectory_prior.py` - Training script
+- `scripts/benchmark_trajectory_prior.py` - Benchmark with different strategies
+
+---
+
+## 🔮 Future Plans
+
+### Short-term: Complete H-D Testing
+1. Collect trajectory data: `python scripts/collect_trajectory_data.py`
+2. Train predictor: `python scripts/train_trajectory_prior.py`
+3. Benchmark: `python scripts/benchmark_trajectory_prior.py`
+4. Target: 30-50% speedup while maintaining quality
+
+### Medium-term: Additional Optimizations
+- **ONNX + Better Quantization**: Revisit with dynamic quantization
+- **Model Pruning**: Remove redundant channels from SSD-1B
+- **Kernel Fusion**: Custom CUDA kernels for CPU (OpenMP)
+
+### Long-term: Anime-Specialized Student
+- Train student UNet on 35K anime images
+- Goal: Better anime quality than generic SSD-1B
+- Use preprocessing pipeline with smart cropping
 
 ---
 
@@ -669,6 +720,23 @@ python scripts/benchmark_with_caching.py \
     --num-threads 4
 ```
 
+### H-D Trajectory Prior (New)
+```bash
+# Collect data (GPU recommended)
+python scripts/collect_trajectory_data.py \
+    --prompts-file hypothesis/general_output.txt \
+    --max-samples 1000
+
+# Train
+python scripts/train_trajectory_prior.py \
+    --data data/trajectory_training \
+    --epochs 30
+
+# Benchmark
+python scripts/benchmark_trajectory_prior.py \
+    --checkpoint checkpoints/trajectory_prior.pt
+```
+
 ### Troubleshooting
 
 **Out of memory**:
@@ -687,7 +755,7 @@ python scripts/benchmark_with_caching.py \
 
 **Project**: CPU Anime Generation (HQPD)  
 **Repository**: https://github.com/n4xOMG/cpugangen  
-**Last Updated**: 2026-01-06
+**Last Updated**: 2026-01-08
 
 ### Credits
 - **Base Model**: Illustrious (martineux/janku6)
@@ -698,5 +766,6 @@ python scripts/benchmark_with_caching.py \
 
 ---
 
-**🎯 Current Milestone**: Full optimization stack complete (3.7x speedup achieved!)  
-**📈 Next Goal**: Validate cache performance with full benchmark + Train anime-specialized student UNet
+**🎯 Current Milestone**: Testing Hypothesis D (Trajectory Prior)  
+**📈 Next Goal**: Achieve 30-50% speedup with predictor-assisted inference
+
