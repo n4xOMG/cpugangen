@@ -49,6 +49,11 @@ class StructuredInitializer(nn.Module):
         self.latent_size = latent_size
         self.low_res = low_res
         
+        # Normalization statistics (will be computed during training)
+        # These handle the large variance in latent deltas
+        self.register_buffer('delta_mean', torch.zeros(1, latent_channels, 1, 1))
+        self.register_buffer('delta_std', torch.ones(1, latent_channels, 1, 1))
+        
         # Project embedding to hidden
         self.embed_proj = nn.Sequential(
             nn.Linear(embed_dim, hidden_dim),
@@ -71,35 +76,36 @@ class StructuredInitializer(nn.Module):
             nn.Conv2d(16, latent_channels, 3, padding=1),
         )
         
-        # Initialize output layers to near-zero for safe starting point
+        # Initialize with scale-aware weights
         self._init_weights()
     
     def _init_weights(self):
-        """Initialize to produce near-zero output initially."""
+        """Initialize with reasonable scale for delta prediction."""
         for module in self.structure_head.modules():
             if isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, std=0.02)
+                nn.init.xavier_normal_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
         
-        # Last layer very small
+        # Last layer: scale to produce reasonable initial outputs (~0 mean, moderate std)
         last_linear = self.structure_head[-1]
-        nn.init.normal_(last_linear.weight, std=0.001)
+        nn.init.normal_(last_linear.weight, std=0.1)  # Increased from 0.001
         nn.init.zeros_(last_linear.bias)
         
-        # Refine layers also small
+        # Refine layers: small residual
         for module in self.refine.modules():
             if isinstance(module, nn.Conv2d):
                 nn.init.normal_(module.weight, std=0.01)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
     
-    def forward(self, pooled_embed: torch.Tensor) -> torch.Tensor:
+    def forward(self, pooled_embed: torch.Tensor, use_normalization: bool = True) -> torch.Tensor:
         """
         Predict structure from pooled embedding.
         
         Args:
             pooled_embed: (B, embed_dim) - CLIP pooled or context mean
+            use_normalization: Whether to denormalize output (True during inference)
             
         Returns:
             structure: (B, 4, latent_size, latent_size)
@@ -109,7 +115,7 @@ class StructuredInitializer(nn.Module):
         # Project embedding
         h = self.embed_proj(pooled_embed)  # (B, hidden_dim)
         
-        # Predict low-res structure
+        # Predict low-res structure (normalized space)
         low_res_flat = self.structure_head(h)  # (B, C*H*W)
         low_res = low_res_flat.view(B, self.latent_channels, self.low_res, self.low_res)
         
@@ -123,6 +129,10 @@ class StructuredInitializer(nn.Module):
         
         # Optional refinement
         structure = structure + self.refine(structure) * 0.1
+        
+        # Denormalize to original delta scale
+        if use_normalization and self.delta_std.sum() > 0:
+            structure = structure * self.delta_std + self.delta_mean
         
         return structure
     
@@ -301,15 +311,27 @@ class StructuredInitTrainer:
         # Compute the actual delta (what step 1 did)
         target_delta = target_latents - initial_latents
         
-        # Forward pass - predict the delta
-        predicted_delta = self.model(pooled_embeds)
+        # Normalize target delta for stable training
+        # Compute per-channel mean and std
+        delta_mean = target_delta.mean(dim=(0, 2, 3), keepdim=True)
+        delta_std = target_delta.std(dim=(0, 2, 3), keepdim=True) + 1e-6
+        target_delta_norm = (target_delta - delta_mean) / delta_std
         
-        # Loss on delta (full MSE, no blur since delta is what matters)
-        loss_delta = F.mse_loss(predicted_delta, target_delta)
+        # Update model's normalization stats (EMA)
+        with torch.no_grad():
+            momentum = 0.1
+            self.model.delta_mean = (1 - momentum) * self.model.delta_mean + momentum * delta_mean.mean(dim=0)
+            self.model.delta_std = (1 - momentum) * self.model.delta_std + momentum * delta_std.mean(dim=0)
+        
+        # Forward pass - predict the delta (normalized)
+        predicted_delta_norm = self.model(pooled_embeds, use_normalization=False)
+        
+        # Loss on normalized delta
+        loss_delta = F.mse_loss(predicted_delta_norm, target_delta_norm)
         
         # Optional: low-frequency delta loss for stability
-        target_delta_lowfreq = gaussian_blur_2d(target_delta, self.blur_sigma)
-        pred_delta_lowfreq = gaussian_blur_2d(predicted_delta, self.blur_sigma)
+        target_delta_lowfreq = gaussian_blur_2d(target_delta_norm, self.blur_sigma)
+        pred_delta_lowfreq = gaussian_blur_2d(predicted_delta_norm, self.blur_sigma)
         loss_lowfreq = F.mse_loss(pred_delta_lowfreq, target_delta_lowfreq)
         
         loss = loss_delta + 0.5 * loss_lowfreq
@@ -317,6 +339,7 @@ class StructuredInitTrainer:
         # Backward pass
         self.optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
         
         return {
