@@ -20,7 +20,7 @@
     "comment": "Images are in flat processed_images dir. Latent metadata maps filenames."
   },
   "training": {
-    "num_epochs": 20,
+    "num_epochs": 10,
     "batch_size": 2,
     "learning_rate": 5e-5,
     "weight_decay": 0.01,
