@@ -89,7 +89,7 @@ class StructuredInitializer(nn.Module):
         
         # Last layer: scale to produce reasonable initial outputs (~0 mean, moderate std)
         last_linear = self.structure_head[-1]
-        nn.init.normal_(last_linear.weight, std=0.1)  # Increased from 0.001
+        nn.init.normal_(last_linear.weight, std=1.0)  # Increased to forced variance
         nn.init.zeros_(last_linear.bias)
         
         # Refine layers: small residual
@@ -311,17 +311,11 @@ class StructuredInitTrainer:
         # Compute the actual delta (what step 1 did)
         target_delta = target_latents - initial_latents
         
-        # Normalize target delta for stable training
-        # Compute per-channel mean and std
-        delta_mean = target_delta.mean(dim=(0, 2, 3), keepdim=True)
-        delta_std = target_delta.std(dim=(0, 2, 3), keepdim=True) + 1e-6
-        target_delta_norm = (target_delta - delta_mean) / delta_std
+        # Normalize target delta using GLOBAL stats (set by training script)
+        # This prevents "normalization jitter" from small batches
+        target_delta_norm = (target_delta - self.model.delta_mean) / (self.model.delta_std + 1e-6)
         
-        # Update model's normalization stats (EMA)
-        with torch.no_grad():
-            momentum = 0.1
-            self.model.delta_mean = (1 - momentum) * self.model.delta_mean + momentum * delta_mean.mean(dim=0)
-            self.model.delta_std = (1 - momentum) * self.model.delta_std + momentum * delta_std.mean(dim=0)
+        # No EMA update needed - stats are pre-calculated globally
         
         # Forward pass - predict the delta (normalized)
         predicted_delta_norm = self.model(pooled_embeds, use_normalization=False)

@@ -35,7 +35,7 @@ def main():
     parser.add_argument("--data", type=str, required=True, help="Training data directory")
     parser.add_argument("--epochs", type=int, default=50, help="Training epochs")
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size")
-    parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--output", type=str, default="checkpoints/struct_init.pt", help="Output checkpoint")
     parser.add_argument("--blur-sigma", type=float, default=4.0, help="Blur sigma for low-freq loss")
     
@@ -62,6 +62,31 @@ def main():
         num_workers=0,
     )
     
+    # Calculate global statistics
+    print("Calculating global normalization statistics...")
+    all_deltas = []
+    # Use a bigger batch size for stats calculation to be faster
+    stats_loader = DataLoader(dataset, batch_size=32, num_workers=0, shuffle=False)
+    
+    for batch in tqdm(stats_loader, desc="Computing stats"):
+        if len(batch) == 3:
+            _, initial, target = batch
+        else:
+            _, target = batch
+            initial = torch.zeros_like(target)
+        
+        delta = target - initial
+        all_deltas.append(delta)
+    
+    all_deltas = torch.cat(all_deltas, dim=0)
+    
+    # Compute stats per channel (B, C, H, W) -> (1, C, 1, 1)
+    global_mean = all_deltas.mean(dim=(0, 2, 3), keepdim=True)
+    global_std = all_deltas.std(dim=(0, 2, 3), keepdim=True)
+    
+    print(f"  Global Mean: {global_mean.flatten()}")
+    print(f"  Global Std:  {global_std.flatten()}")
+    
     # Create model
     print("\nCreating model...")
     model = StructuredInitializer(
@@ -71,6 +96,10 @@ def main():
         latent_size=64,
         low_res=8,
     )
+    
+    # Set global stats
+    model.delta_mean.copy_(global_mean)
+    model.delta_std.copy_(global_std)
     
     num_params = sum(p.numel() for p in model.parameters())
     print(f"  Parameters: {num_params:,} ({num_params * 4 / 1024 / 1024:.1f} MB)")
