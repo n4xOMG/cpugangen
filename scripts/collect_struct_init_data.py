@@ -21,6 +21,7 @@ import argparse
 import gc
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import List
 import random
@@ -30,6 +31,9 @@ from diffusers import StableDiffusionXLPipeline, UNet2DConditionModel, EulerDisc
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from tqdm import tqdm
+
+# Suppress harmless diffusers warning
+warnings.filterwarnings("ignore", message=".*scale_model_input.*")
 
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent.parent))

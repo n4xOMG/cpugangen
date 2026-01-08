@@ -291,8 +291,9 @@ class StructuredInitTrainer:
         """Single training step."""
         self.model.train()
         
-        pooled_embeds = pooled_embeds.to(self.device)
-        target_latents = target_latents.to(self.device)
+        # Convert to float32 in case data was collected with fp16
+        pooled_embeds = pooled_embeds.to(self.device).float()
+        target_latents = target_latents.to(self.device).float()
         
         # Forward pass
         predicted = self.model(pooled_embeds)
