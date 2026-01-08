@@ -367,13 +367,16 @@ def predictor_assisted_denoise(
     device = latents.device
     
     for i, t in enumerate(timesteps):
-        t_tensor = torch.tensor([t], device=device)
+        t_tensor = torch.tensor([t], device=device, dtype=latents.dtype)
+        
+        # IMPORTANT: Predictor was trained on UNSCALED latents (z_t before scale_model_input)
+        # UNet expects SCALED input (latent_model_input after scale_model_input)
         latent_model_input = scheduler.scale_model_input(latents, t)
         
         if i in predictor_steps and blend_weight < 1.0:
-            # Use predictor (fast)
+            # Use predictor (fast) - pass UNSCALED latents (matches training data)
             with torch.no_grad():
-                noise_pred = predictor(latent_model_input, t_tensor)
+                noise_pred = predictor(latents, t_tensor)  # Use latents, not latent_model_input!
                 
                 if blend_weight > 0:
                     # Blend with UNet
@@ -385,7 +388,7 @@ def predictor_assisted_denoise(
                     )[0]
                     noise_pred = (1 - blend_weight) * noise_pred + blend_weight * unet_pred
         else:
-            # Use UNet (accurate)
+            # Use UNet (accurate) - pass SCALED input
             with torch.no_grad():
                 noise_pred = unet(
                     latent_model_input, t,
