@@ -40,13 +40,23 @@ def clear_memory():
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
 
-def load_prompts_from_file(filepath: str) -> List[str]:
-    """Load prompts from a text file, one prompt per line."""
+def load_prompts_from_file(filepath: str, convert_spaces_to_commas: bool = False) -> List[str]:
+    """
+    Load prompts from a text file, one prompt per line.
+    
+    Args:
+        filepath: Path to the prompts file
+        convert_spaces_to_commas: If True, convert "1girl white hair" to "1girl, white, hair"
+                                  Usually not needed - SDXL understands space-separated tags
+    """
     prompts = []
     with open(filepath, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith('#'):  # Skip empty lines and comments
+                if convert_spaces_to_commas:
+                    # Convert spaces to commas (for models that prefer comma separation)
+                    line = ', '.join(line.split())
                 prompts.append(line)
     return prompts
 
