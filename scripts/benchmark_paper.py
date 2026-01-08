@@ -9,6 +9,8 @@ Tests all optimization configurations for research paper comparison:
 - Baseline D: Illustrious + SSD-1B UNet + SDXL-Lightning + Caching (full)
 - Baseline E: Baseline C + TAESD VAE (tiny VAE decoder)
 - Baseline F: Baseline D + TAESD VAE (full optimization + tiny VAE)
+- Baseline G: Baseline C + Custom TinyVAE (trained on anime dataset)
+- Baseline H: Baseline D + Custom TinyVAE (full optimization + custom VAE)
 
 Usage:
     python scripts/benchmark_paper.py \\
@@ -36,6 +38,84 @@ from safetensors.torch import load_file
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hqpd.optimization import CacheContext, get_global_cache
+from hqpd.models.tiny_vae import TinyVAEDecoder
+
+
+class TinyVAEWrapper:
+    """
+    Wrapper to make TinyVAEDecoder compatible with diffusers pipeline.
+    
+    The pipeline expects vae.decode(latents).sample interface.
+    """
+    
+    def __init__(self, decoder: TinyVAEDecoder, scaling_factor: float = 0.13025):
+        self.decoder = decoder
+        self.scaling_factor = scaling_factor
+        # Match expected config interface
+        self.config = type('Config', (), {'scaling_factor': scaling_factor})()
+    
+    def decode(self, latents, return_dict=True):
+        """Decode latents to image, matching diffusers VAE interface."""
+        # Unscale latents (pipeline passes scaled latents)
+        latents_unscaled = latents / self.scaling_factor
+        
+        # Decode
+        decoded = self.decoder(latents_unscaled)
+        
+        # Return in expected format
+        if return_dict:
+            return type('VAEOutput', (), {'sample': decoded})()
+        return decoded
+    
+    def to(self, device):
+        self.decoder = self.decoder.to(device)
+        return self
+    
+    def eval(self):
+        self.decoder.eval()
+        return self
+    
+    @property
+    def dtype(self):
+        return next(self.decoder.parameters()).dtype
+    
+    @property
+    def device(self):
+        return next(self.decoder.parameters()).device
+
+
+def load_custom_tinyvae(checkpoint_path: str = "checkpoints/tiny_vae/tiny_vae_decoder_epoch10.pt") -> TinyVAEWrapper:
+    """
+    Load custom trained TinyVAE decoder.
+    
+    Args:
+        checkpoint_path: Path to trained checkpoint
+        
+    Returns:
+        TinyVAEWrapper compatible with diffusers pipeline
+    """
+    from pathlib import Path
+    
+    ckpt_path = Path(checkpoint_path)
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"TinyVAE checkpoint not found: {ckpt_path}")
+    
+    # Load state dict
+    state_dict = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+    
+    # Create decoder with same config as training
+    decoder = TinyVAEDecoder(
+        latent_channels=4,
+        base_channels=64,
+        max_channels=256,
+        num_upsample_blocks=3
+    )
+    decoder.load_state_dict(state_dict)
+    decoder.eval()
+    
+    print(f"  ✓ Loaded custom TinyVAE from: {ckpt_path}")
+    
+    return TinyVAEWrapper(decoder)
 
 
 def clear_memory():
@@ -472,6 +552,127 @@ def load_baseline_f() -> StableDiffusionXLPipeline:
     return pipeline
 
 
+def load_baseline_g() -> StableDiffusionXLPipeline:
+    """Baseline G: Hybrid + Custom TinyVAE (SSD-1B UNet + Lightning + Trained TinyVAE)."""
+    print("Loading Baseline G: Hybrid + Custom TinyVAE...")
+    
+    # Load base
+    pipeline = StableDiffusionXLPipeline.from_pretrained(
+        "martineux/janku6",
+        torch_dtype=torch.float32,
+    )
+    
+    # Replace UNet with SSD-1B
+    print("  Loading SSD-1B UNet...")
+    try:
+        ssd1b_unet = UNet2DConditionModel.from_pretrained(
+            "segmind/SSD-1B",
+            subfolder="unet",
+            torch_dtype=torch.float32,
+        )
+    except Exception:
+        ssd1b_pipe = StableDiffusionXLPipeline.from_pretrained(
+            "segmind/SSD-1B",
+            torch_dtype=torch.float32,
+        )
+        ssd1b_unet = ssd1b_pipe.unet
+        del ssd1b_pipe
+        clear_memory()
+    
+    pipeline.unet = ssd1b_unet
+    print("  ✓ UNet replaced with SSD-1B")
+    
+    # Replace VAE with Custom TinyVAE
+    print("  Loading Custom TinyVAE...")
+    custom_vae = load_custom_tinyvae()
+    pipeline.vae = custom_vae
+    print("  ✓ VAE replaced with Custom TinyVAE")
+    
+    # Apply Lightning LoRA
+    ckpt = hf_hub_download("ByteDance/SDXL-Lightning", "sdxl_lightning_4step_lora.safetensors")
+    pipeline.load_lora_weights(load_file(ckpt))
+    
+    # Configure scheduler
+    pipeline.scheduler = EulerDiscreteScheduler.from_config(
+        pipeline.scheduler.config,
+        timestep_spacing="trailing",
+        prediction_type="epsilon",
+    )
+    
+    pipeline.fuse_lora()
+    pipeline.unload_lora_weights()
+    
+    pipeline = pipeline.to("cpu")
+    
+    print("  ✓ Hybrid + Custom TinyVAE pipeline loaded")
+    return pipeline
+
+
+def load_baseline_h() -> StableDiffusionXLPipeline:
+    """Baseline H: Full Optimization + Custom TinyVAE (SSD-1B + Lightning + Caching + Trained TinyVAE)."""
+    print("Loading Baseline H: Full Optimization + Custom TinyVAE...")
+    
+    # Initialize cache
+    cache = get_global_cache(max_size=256, enabled=True)
+    print("  ✓ Cache initialized (256 entries)")
+    
+    # Load base
+    pipeline = StableDiffusionXLPipeline.from_pretrained(
+        "martineux/janku6",
+        torch_dtype=torch.float32,
+    )
+    
+    # Replace UNet with SSD-1B
+    print("  Loading SSD-1B UNet...")
+    try:
+        ssd1b_unet = UNet2DConditionModel.from_pretrained(
+            "segmind/SSD-1B",
+            subfolder="unet",
+            torch_dtype=torch.float32,
+        )
+    except Exception:
+        ssd1b_pipe = StableDiffusionXLPipeline.from_pretrained(
+            "segmind/SSD-1B",
+            torch_dtype=torch.float32,
+        )
+        ssd1b_unet = ssd1b_pipe.unet
+        del ssd1b_pipe
+        clear_memory()
+    
+    pipeline.unet = ssd1b_unet
+    print("  ✓ UNet replaced with SSD-1B")
+    
+    # Replace VAE with Custom TinyVAE
+    print("  Loading Custom TinyVAE...")
+    custom_vae = load_custom_tinyvae()
+    pipeline.vae = custom_vae
+    print("  ✓ VAE replaced with Custom TinyVAE")
+    
+    # Apply Lightning LoRA
+    ckpt = hf_hub_download("ByteDance/SDXL-Lightning", "sdxl_lightning_4step_lora.safetensors")
+    pipeline.load_lora_weights(load_file(ckpt))
+    
+    # Configure scheduler
+    pipeline.scheduler = EulerDiscreteScheduler.from_config(
+        pipeline.scheduler.config,
+        timestep_spacing="trailing",
+        prediction_type="epsilon",
+    )
+    
+    pipeline.fuse_lora()
+    pipeline.unload_lora_weights()
+    
+    pipeline = pipeline.to("cpu")
+    
+    # Attach cache context
+    cache_ctx = CacheContext(enabled=True, max_size=256, clear_on_enter=True, print_stats_on_exit=False)
+    cache_ctx.__enter__()
+    pipeline._cache_context = cache_ctx
+    
+    print("  ✓ Full optimization + Custom TinyVAE pipeline loaded")
+    return pipeline
+
+
 def create_comparison_table(results: List[Dict[str, Any]], output_dir: Path):
     """Create publication-ready comparison table."""
     
@@ -636,6 +837,38 @@ def main():
         warmup=1,
     )
     results.append(result_f)
+    
+    # Baseline G: Hybrid + Custom TinyVAE
+    try:
+        result_g = benchmark_configuration(
+            config_name="Baseline G: Hybrid + Custom TinyVAE",
+            load_fn=load_baseline_g,
+            prompts=prompts,
+            num_steps=4,
+            guidance_scale=0.0,
+            warmup=1,
+        )
+        results.append(result_g)
+    except FileNotFoundError as e:
+        print(f"\n⚠️ Baseline G skipped: {e}")
+    except Exception as e:
+        print(f"\n⚠️ Baseline G failed: {e}")
+    
+    # Baseline H: Full Optimization + Custom TinyVAE
+    try:
+        result_h = benchmark_configuration(
+            config_name="Baseline H: Full Opt + Custom TinyVAE",
+            load_fn=load_baseline_h,
+            prompts=prompts,
+            num_steps=4,
+            guidance_scale=0.0,
+            warmup=1,
+        )
+        results.append(result_h)
+    except FileNotFoundError as e:
+        print(f"\n⚠️ Baseline H skipped: {e}")
+    except Exception as e:
+        print(f"\n⚠️ Baseline H failed: {e}")
     
     # Save raw results
     results_path = output_dir / "benchmark_results.json"
