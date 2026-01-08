@@ -123,19 +123,21 @@ def main():
     for epoch in range(args.epochs):
         metrics = trainer.train_epoch(dataloader, verbose=False)
         
-        # Format: show all key metrics
+        # Format: show all key metrics including correlation
         print(f"Epoch {epoch+1}/{args.epochs}: "
               f"loss={metrics['avg_loss']:.4f}, "
-              f"pred_std={metrics.get('avg_pred_std', 0):.3f}, "
-              f"grad={metrics.get('avg_grad_norm', 0):.3f}")
+              f"mse={metrics.get('avg_loss_mse', 0):.4f}, "
+              f"corr={metrics.get('avg_correlation', 0):.3f}, "
+              f"pred_std={metrics.get('avg_pred_std', 0):.3f}")
         
-        # Save best
-        if metrics['avg_loss'] < best_loss:
-            best_loss = metrics['avg_loss']
+        # Save best based on MSE (the actual reconstruction quality)
+        mse_loss = metrics.get('avg_loss_mse', metrics['avg_loss'])
+        if mse_loss < best_loss:
+            best_loss = mse_loss
             output_path = Path(args.output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             model.save(str(output_path))
-            print(f"  ✓ Saved checkpoint (loss={best_loss:.4f})")
+            print(f"  ✓ Saved checkpoint (mse={best_loss:.4f}, corr={metrics.get('avg_correlation', 0):.3f})")
     
     print(f"\n✓ Training complete. Best loss: {best_loss:.4f}")
     print(f"✓ Model saved to: {args.output}")

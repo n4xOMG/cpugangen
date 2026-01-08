@@ -315,22 +315,35 @@ class StructuredInitTrainer:
         # This prevents "normalization jitter" from small batches
         target_delta_norm = (target_delta - self.model.delta_mean) / (self.model.delta_std + 1e-6)
         
-        # No EMA update needed - stats are pre-calculated globally
-        
         # Forward pass - predict the delta (normalized)
         predicted_delta_norm = self.model(pooled_embeds, use_normalization=False)
         
-        # Loss on normalized delta
-        loss_delta = F.mse_loss(predicted_delta_norm, target_delta_norm)
+        # === LOSS 1: MSE Loss ===
+        loss_mse = F.mse_loss(predicted_delta_norm, target_delta_norm)
         
-        # Simplified: use pure MSE loss (no low-freq weighting)
-        loss = loss_delta
+        # === LOSS 2: Correlation Loss (prevents mode collapse) ===
+        # Flatten spatial dims for correlation computation
+        B = predicted_delta_norm.shape[0]
+        pred_flat = predicted_delta_norm.view(B, -1)  # (B, C*H*W)
+        target_flat = target_delta_norm.view(B, -1)
         
-        # Optional: low-frequency delta loss for stability (DISABLED - was confusing training)
-        # target_delta_lowfreq = gaussian_blur_2d(target_delta_norm, self.blur_sigma)
-        # pred_delta_lowfreq = gaussian_blur_2d(predicted_delta_norm, self.blur_sigma)
-        # loss_lowfreq = F.mse_loss(pred_delta_lowfreq, target_delta_lowfreq)
-        # loss = loss_delta + 0.5 * loss_lowfreq
+        # Per-sample correlation (cosine similarity)
+        pred_centered = pred_flat - pred_flat.mean(dim=1, keepdim=True)
+        target_centered = target_flat - target_flat.mean(dim=1, keepdim=True)
+        
+        pred_norm = pred_centered.norm(dim=1, keepdim=True).clamp(min=1e-6)
+        target_norm = target_centered.norm(dim=1, keepdim=True).clamp(min=1e-6)
+        
+        correlation = (pred_centered * target_centered).sum(dim=1) / (pred_norm.squeeze() * target_norm.squeeze())
+        loss_corr = 1.0 - correlation.mean()  # Want correlation → 1
+        
+        # === LOSS 3: Variance matching (force model to produce varied outputs) ===
+        pred_var = predicted_delta_norm.var()
+        target_var = target_delta_norm.var()
+        loss_var = (pred_var - target_var).abs()  # Match variance
+        
+        # Combined loss: MSE + correlation + variance matching
+        loss = loss_mse + 0.5 * loss_corr + 0.1 * loss_var
         
         # Backward pass
         self.optimizer.zero_grad()
@@ -340,9 +353,12 @@ class StructuredInitTrainer:
         
         return {
             "loss": loss.item(),
-            "loss_delta": loss_delta.item(),
+            "loss_mse": loss_mse.item(),
+            "loss_corr": loss_corr.item(),
+            "loss_var": loss_var.item(),
             "pred_std": predicted_delta_norm.std().item(),
             "target_std": target_delta_norm.std().item(),
+            "correlation": correlation.mean().item(),
             "grad_norm": grad_norm.item(),
         }
     
@@ -353,8 +369,11 @@ class StructuredInitTrainer:
     ) -> Dict[str, float]:
         """Train for one epoch."""
         total_loss = 0.0
-        total_delta = 0.0
+        total_mse = 0.0
+        total_corr = 0.0
+        total_var = 0.0
         total_pred_std = 0.0
+        total_correlation = 0.0
         total_grad_norm = 0.0
         num_batches = 0
         
@@ -368,18 +387,24 @@ class StructuredInitTrainer:
             
             metrics = self.train_step(pooled_embeds, initial_latents, target_latents)
             total_loss += metrics["loss"]
-            total_delta += metrics["loss_delta"]
+            total_mse += metrics.get("loss_mse", 0)
+            total_corr += metrics.get("loss_corr", 0)
+            total_var += metrics.get("loss_var", 0)
             total_pred_std += metrics.get("pred_std", 0)
+            total_correlation += metrics.get("correlation", 0)
             total_grad_norm += metrics.get("grad_norm", 0)
             num_batches += 1
             
             if verbose and num_batches % 10 == 0:
-                print(f"  Batch {num_batches}: loss={metrics['loss']:.4f}")
+                print(f"  Batch {num_batches}: loss={metrics['loss']:.4f}, corr={metrics.get('correlation', 0):.3f}")
         
         return {
             "avg_loss": total_loss / max(1, num_batches),
-            "avg_loss_delta": total_delta / max(1, num_batches),
+            "avg_loss_mse": total_mse / max(1, num_batches),
+            "avg_loss_corr": total_corr / max(1, num_batches),
+            "avg_loss_var": total_var / max(1, num_batches),
             "avg_pred_std": total_pred_std / max(1, num_batches),
+            "avg_correlation": total_correlation / max(1, num_batches),
             "avg_grad_norm": total_grad_norm / max(1, num_batches),
         }
 
