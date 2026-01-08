@@ -202,13 +202,15 @@ def collect_sample(
     pipeline.scheduler.set_timesteps(num_steps, device=device)
     timesteps = pipeline.scheduler.timesteps
     
-    # Prepare initial latents (random)
-    initial_latent = torch.randn(
+    # Prepare initial latents (random, then scaled)
+    noise = torch.randn(
         (1, 4, 64, 64),
         generator=generator,
         dtype=prompt_embeds.dtype,
     ).to(device)
-    latents = initial_latent * pipeline.scheduler.init_noise_sigma
+    # Scale by init_noise_sigma (this is what pipeline normally does)
+    initial_latent = noise * pipeline.scheduler.init_noise_sigma
+    latents = initial_latent.clone()  # Start denoising from scaled latent
     
     # Prepare added conditioning
     add_time_ids = pipeline._get_add_time_ids(
@@ -252,7 +254,7 @@ def collect_sample(
         "seed": seed,
         "target_step": target_step,
         "pooled_embed": pooled_prompt_embeds.cpu().squeeze(0),  # (1280,)
-        "initial_latent": initial_latent.cpu().squeeze(0),  # (4, 64, 64) - the random noise
+        "initial_latent": initial_latent.cpu().squeeze(0),  # (4, 64, 64) - SCALED initial noise
         "target_latent": target_latent.cpu().squeeze(0),  # (4, 64, 64) - after target_step
     }
 
