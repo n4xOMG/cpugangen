@@ -653,43 +653,61 @@ cpugangen/
   - Blind prediction impossible without seeing current state
 - **Lesson**: Small networks can't learn high-dimensional mappings blindly
 
-### 🚧 H-D: Universal Trajectory Prior (In Progress)
+### ❌ H-D: Universal Trajectory Prior
 - **Idea**: Train meta-predictor that learns universal anime denoising patterns
 - **Key difference from H10**: Predictor sees `z_t` (current latent state), not just prompt
-- **Architecture**:
-  ```
-  Input: z_t (4×64×64) + timestep → ConvNet (~5M params) → predicted_noise
-  ```
-- **Inference strategy**:
-  1. Predictor makes fast "universal guess" (domain-specific prior)
-  2. UNet acts as "corrector" for prompt-specific details
-  3. Use predictor for some steps, UNet for others → 30-50% speedup target
+- **Result**: Training converged (loss=0.028, cos=0.981), but output was garbage
+- **Why it failed**:
+  - Predictor has NO prompt information
+  - Can only predict "generic anime patterns", not prompt-specific content
+  - Even one bad step corrupts the entire generation
+- **Lesson**: Without prompt conditioning, universal patterns aren't enough
 
-**Files Created**:
-- `hqpd/optimization/trajectory_prior.py` - TrajectoryPredictor model
-- `scripts/collect_trajectory_data.py` - Data collection
-- `scripts/train_trajectory_prior.py` - Training script
-- `scripts/benchmark_trajectory_prior.py` - Benchmark with different strategies
+---
+
+## 🔮 Current Focus: Causal Tracing + Step-Specific Pruning
+
+### Hypothesis: Step-Specialized Micro-UNets
+Not all UNet layers are equally active at each Lightning step. Using causal tracing:
+1. Identify which attention heads/residual blocks are **truly causal** for image formation at each step
+2. Create 4 specialized, pruned computational graphs (one per step)
+3. Remove overhead of dynamic computation
+
+```
+Step 1 UNet: Focus on global structure → prune detail layers
+Step 2 UNet: Mix → moderate pruning  
+Step 3 UNet: Mix → moderate pruning
+Step 4 UNet: Focus on details → prune structure layers
+```
+
+### Why It Should Work
+- With only 4 steps, can afford to create 4 specialized static graphs
+- No dynamic gating overhead
+- Each micro-UNet is smaller and faster
+- Turns single UNet into pipeline of progressively detailed networks
+
+### Implementation Plan
+1. **Causal Tracing Analysis**: Run path patching on SSD-1B for many prompts
+2. **Identify Inactive Components**: Find layers consistently inactive at each step
+3. **Create Pruned Checkpoints**: 4 specialized model files
+4. **Fine-tune**: Light tuning to recover cooperative benefits
 
 ---
 
 ## 🔮 Future Plans
 
-### Short-term: Complete H-D Testing
-1. Collect trajectory data: `python scripts/collect_trajectory_data.py`
-2. Train predictor: `python scripts/train_trajectory_prior.py`
-3. Benchmark: `python scripts/benchmark_trajectory_prior.py`
-4. Target: 30-50% speedup while maintaining quality
+### Short-term: Causal Pruning Analysis
+1. Implement causal tracing for SSD-1B UNet
+2. Analyze layer activation patterns across steps
+3. Create pruning masks per step
 
 ### Medium-term: Additional Optimizations
 - **ONNX + Better Quantization**: Revisit with dynamic quantization
-- **Model Pruning**: Remove redundant channels from SSD-1B
-- **Kernel Fusion**: Custom CUDA kernels for CPU (OpenMP)
+- **Kernel Fusion**: Custom kernels for CPU (OpenMP)
 
 ### Long-term: Anime-Specialized Student
 - Train student UNet on 35K anime images
 - Goal: Better anime quality than generic SSD-1B
-- Use preprocessing pipeline with smart cropping
 
 ---
 

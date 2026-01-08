@@ -8,3 +8,4 @@ outputs/
 data/*
 checkpoints/
 onnx_models/
+hypothesis/*
