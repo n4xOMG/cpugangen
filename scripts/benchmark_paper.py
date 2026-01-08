@@ -103,9 +103,13 @@ def benchmark_configuration(
             )
             print(f"  Warmup {i+1}/{warmup} complete")
     
-    # Reset cache if using caching
+    # Reset cache if using caching (safely check for method)
     if hasattr(pipeline, '_cache_context'):
-        pipeline._cache_context.reset_statistics()
+        ctx = pipeline._cache_context
+        if hasattr(ctx, 'reset_statistics'):
+            ctx.reset_statistics()
+        elif hasattr(ctx, 'clear'):
+            ctx.clear()
     
     # Benchmark runs
     times = []
@@ -131,10 +135,15 @@ def benchmark_configuration(
         
         print(f"  [{i+1}/{len(prompts)}] {elapsed:.2f}s | Peak: {memory_peak:.2f} GB")
     
-    # Get cache statistics if available
+    # Get cache statistics if available (safely)
     cache_stats = None
     if hasattr(pipeline, '_cache_context'):
-        cache_stats = pipeline._cache_context.get_statistics()
+        ctx = pipeline._cache_context
+        if hasattr(ctx, 'get_statistics'):
+            cache_stats = ctx.get_statistics()
+        else:
+            # Fallback: return basic info
+            cache_stats = {'hit_rate': 0, 'hits': 0, 'misses': 0, 'memory_mb': 0}
     
     # Cleanup pipeline
     del pipeline
