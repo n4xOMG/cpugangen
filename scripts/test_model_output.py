@@ -14,7 +14,10 @@ from hqpd.optimization.structured_init import StructuredInitializer, StructuredI
 model_path = "checkpoints/struct_init.pt"
 model = StructuredInitializer.load(model_path)
 
+# Detect model dtype
+model_dtype = next(model.parameters()).dtype
 print(f"Model loaded from: {model_path}")
+print(f"Model dtype: {model_dtype}")
 print(f"Delta mean: {model.delta_mean.squeeze()}")
 print(f"Delta std: {model.delta_std.squeeze()}")
 
@@ -30,10 +33,11 @@ for i in range(min(5, len(dataset))):
     # Ground truth delta
     target_delta = target_latent - initial_latent
     
-    # Predict (with normalization)
+    # Predict (with normalization) - convert to model dtype
     with torch.no_grad():
-        predicted_delta = model(pooled_embed.unsqueeze(0), use_normalization=True)
-        predicted_delta = predicted_delta.squeeze(0)
+        pooled_embed_model = pooled_embed.unsqueeze(0).to(dtype=model_dtype)
+        predicted_delta = model(pooled_embed_model, use_normalization=True)
+        predicted_delta = predicted_delta.squeeze(0).float()  # Convert back to fp32 for comparison
     
     # Stats
     print(f"\nSample {i}:")
