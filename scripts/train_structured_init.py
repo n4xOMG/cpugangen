@@ -94,7 +94,7 @@ def main():
     for epoch in range(args.epochs):
         metrics = trainer.train_epoch(dataloader, verbose=False)
         
-        print(f"Epoch {epoch+1}/{args.epochs}: loss={metrics['avg_loss']:.4f}, lowfreq={metrics['avg_loss_lowfreq']:.4f}")
+        print(f"Epoch {epoch+1}/{args.epochs}: loss={metrics['avg_loss']:.4f}, delta={metrics['avg_loss_delta']:.4f}")
         
         # Save best
         if metrics['avg_loss'] < best_loss:

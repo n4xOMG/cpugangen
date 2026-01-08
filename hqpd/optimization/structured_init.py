@@ -186,66 +186,60 @@ def smart_latent_init(
     pooled_embed: torch.Tensor,
     seed: int,
     init_noise_sigma: float = 1.0,
-    variation_scale: float = 0.7,
-    structure_scale: float = 0.3,
-    blur_sigma: float = 4.0,
+    delta_scale: float = 1.0,  # How much of predicted delta to apply (1.0 = full)
     device: str = "cpu",
 ) -> torch.Tensor:
     """
-    Generate smart initial latent combining learned structure with random variation.
+    Generate smart initial latent by predicting what step 1 would do.
+    
+    The model predicts the DELTA that step 1 applies to random noise.
+    We apply this delta to new random noise to get a "head start".
     
     Args:
-        initializer: Trained StructuredInitializer model
+        initializer: Trained StructuredInitializer model (predicts delta)
         pooled_embed: (1, embed_dim) CLIP pooled embedding
-        seed: Random seed for variation
+        seed: Random seed for noise generation
         init_noise_sigma: Scheduler's initial noise sigma
-        variation_scale: How much random variation to add (0-1)
-        structure_scale: How much learned structure to use (0-1)
-        blur_sigma: Sigma for frequency separation blur
+        delta_scale: How much of the predicted delta to apply (0-1)
         device: Device to use
         
     Returns:
-        init_latent: (1, 4, H, W) initialized latent
+        init_latent: (1, 4, H, W) initialized latent ready for step 2+
     """
     with torch.no_grad():
-        # Get predicted structure
-        structure = initializer(pooled_embed.to(device))  # (1, 4, 64, 64)
-        
-        # Extract low-frequency component
-        structure_lowfreq = gaussian_blur_2d(structure, sigma=blur_sigma)
-        
-        # Generate random noise with seed
+        # Generate random noise (same as normal init)
         generator = torch.Generator(device="cpu").manual_seed(seed)
         noise = torch.randn(
-            structure.shape,
+            (1, 4, 64, 64),
             generator=generator,
-            dtype=structure.dtype,
+            dtype=torch.float32,
         ).to(device)
         
-        # Extract high-frequency component of noise
-        noise_lowfreq = gaussian_blur_2d(noise, sigma=blur_sigma)
-        noise_highfreq = noise - noise_lowfreq
+        # Scale noise by init sigma (standard initialization)
+        initial_latent = noise * init_noise_sigma
         
-        # Combine: learned structure (low-freq) + random variation (high-freq)
-        init_latent = (
-            structure_scale * structure_lowfreq +
-            variation_scale * noise_highfreq +
-            (1.0 - structure_scale - variation_scale) * noise
-        )
+        # Predict what step 1 would do to this noise
+        predicted_delta = initializer(pooled_embed.to(device).float())
         
-        # Scale by scheduler's init sigma
-        init_latent = init_latent * init_noise_sigma
+        # Apply the delta: simulate having run step 1
+        smart_latent = initial_latent + delta_scale * predicted_delta
         
-    return init_latent
+    return smart_latent
+
+
 
 
 class StructuredInitDataset(torch.utils.data.Dataset):
     """
     Dataset for training StructuredInitializer.
     
-    Each sample: (pooled_embedding, target_latent)
+    Each sample: (pooled_embedding, initial_latent, target_latent)
     - pooled_embedding: CLIP pooled embedding of the prompt
-    - target_latent: Final denoised latent from the pipeline
+    - initial_latent: Random noise latent (scaled)
+    - target_latent: Latent after step 1 of denoising
+    
+    We train to predict: delta = target_latent - initial_latent
+    This delta represents "what step 1 did" to the noise.
     """
     
     def __init__(self, data_dir: str):
@@ -258,9 +252,11 @@ class StructuredInitDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.samples)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         sample = torch.load(self.samples[idx], map_location="cpu")
-        return sample["pooled_embed"], sample["target_latent"]
+        # Handle both old format (no initial_latent) and new format
+        initial_latent = sample.get("initial_latent", torch.zeros_like(sample["target_latent"]))
+        return sample["pooled_embed"], initial_latent, sample["target_latent"]
 
 
 class StructuredInitTrainer:
@@ -286,28 +282,37 @@ class StructuredInitTrainer:
     def train_step(
         self,
         pooled_embeds: torch.Tensor,
+        initial_latents: torch.Tensor,
         target_latents: torch.Tensor,
     ) -> Dict[str, float]:
-        """Single training step."""
+        """
+        Single training step.
+        
+        We train to predict the DELTA: target_latent - initial_latent
+        This represents what denoising step 1 does to the noise.
+        """
         self.model.train()
         
         # Convert to float32 in case data was collected with fp16
         pooled_embeds = pooled_embeds.to(self.device).float()
+        initial_latents = initial_latents.to(self.device).float()
         target_latents = target_latents.to(self.device).float()
         
-        # Forward pass
-        predicted = self.model(pooled_embeds)
+        # Compute the actual delta (what step 1 did)
+        target_delta = target_latents - initial_latents
         
-        # Low-frequency reconstruction loss
-        target_lowfreq = gaussian_blur_2d(target_latents, self.blur_sigma)
-        pred_lowfreq = gaussian_blur_2d(predicted, self.blur_sigma)
+        # Forward pass - predict the delta
+        predicted_delta = self.model(pooled_embeds)
         
-        loss_lowfreq = F.mse_loss(pred_lowfreq, target_lowfreq)
+        # Loss on delta (full MSE, no blur since delta is what matters)
+        loss_delta = F.mse_loss(predicted_delta, target_delta)
         
-        # Optional: small penalty on full prediction to avoid divergence
-        loss_reg = F.mse_loss(predicted, target_latents) * 0.1
+        # Optional: low-frequency delta loss for stability
+        target_delta_lowfreq = gaussian_blur_2d(target_delta, self.blur_sigma)
+        pred_delta_lowfreq = gaussian_blur_2d(predicted_delta, self.blur_sigma)
+        loss_lowfreq = F.mse_loss(pred_delta_lowfreq, target_delta_lowfreq)
         
-        loss = loss_lowfreq + loss_reg
+        loss = loss_delta + 0.5 * loss_lowfreq
         
         # Backward pass
         self.optimizer.zero_grad()
@@ -316,8 +321,8 @@ class StructuredInitTrainer:
         
         return {
             "loss": loss.item(),
+            "loss_delta": loss_delta.item(),
             "loss_lowfreq": loss_lowfreq.item(),
-            "loss_reg": loss_reg.item(),
         }
     
     def train_epoch(
@@ -327,13 +332,20 @@ class StructuredInitTrainer:
     ) -> Dict[str, float]:
         """Train for one epoch."""
         total_loss = 0.0
-        total_lowfreq = 0.0
+        total_delta = 0.0
         num_batches = 0
         
-        for pooled_embeds, target_latents in dataloader:
-            metrics = self.train_step(pooled_embeds, target_latents)
+        for batch in dataloader:
+            # Handle both old (2-value) and new (3-value) format
+            if len(batch) == 3:
+                pooled_embeds, initial_latents, target_latents = batch
+            else:
+                pooled_embeds, target_latents = batch
+                initial_latents = torch.zeros_like(target_latents)
+            
+            metrics = self.train_step(pooled_embeds, initial_latents, target_latents)
             total_loss += metrics["loss"]
-            total_lowfreq += metrics["loss_lowfreq"]
+            total_delta += metrics["loss_delta"]
             num_batches += 1
             
             if verbose and num_batches % 10 == 0:
@@ -341,5 +353,6 @@ class StructuredInitTrainer:
         
         return {
             "avg_loss": total_loss / max(1, num_batches),
-            "avg_loss_lowfreq": total_lowfreq / max(1, num_batches),
+            "avg_loss_delta": total_delta / max(1, num_batches),
         }
+

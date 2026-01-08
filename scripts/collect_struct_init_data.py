@@ -171,9 +171,21 @@ def collect_sample(
     prompt: str,
     seed: int,
     num_steps: int = 4,
+    target_step: int = 1,  # Save latent after this step (1 = after first step)
 ) -> dict:
     """
-    Run pipeline and collect (embedding, final_latent) pair.
+    Run pipeline and collect (embedding, intermediate_latent) pair.
+    
+    The target latent is saved AFTER target_step denoising steps.
+    For 3-step inference, we want the latent after step 1 of 4-step,
+    so the 3-step can continue from there.
+    
+    Args:
+        pipeline: The diffusion pipeline
+        prompt: Text prompt
+        seed: Random seed
+        num_steps: Total inference steps (usually 4 for Lightning)
+        target_step: Which step's output to save (1 = after first step)
     """
     device = pipeline.device if hasattr(pipeline, 'device') else torch.device("cpu")
     generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -186,17 +198,17 @@ def collect_sample(
         do_classifier_free_guidance=False,
     )
     
-    # Prepare timesteps
+    # Prepare timesteps for full run
     pipeline.scheduler.set_timesteps(num_steps, device=device)
     timesteps = pipeline.scheduler.timesteps
     
     # Prepare initial latents (random)
-    latents = torch.randn(
+    initial_latent = torch.randn(
         (1, 4, 64, 64),
         generator=generator,
-        dtype=prompt_embeds.dtype,  # Match pipeline dtype
+        dtype=prompt_embeds.dtype,
     ).to(device)
-    latents = latents * pipeline.scheduler.init_noise_sigma
+    latents = initial_latent * pipeline.scheduler.init_noise_sigma
     
     # Prepare added conditioning
     add_time_ids = pipeline._get_add_time_ids(
@@ -210,25 +222,38 @@ def collect_sample(
         "time_ids": add_time_ids,
     }
     
-    # Run denoising loop
+    # Run denoising loop and capture intermediate latent
+    target_latent = None
     with torch.no_grad():
-        for t in timesteps:
-            timestep = torch.tensor([t], device=device, dtype=latents.dtype)
+        for step_idx, t in enumerate(timesteps):
+            # Scale model input
+            latent_model_input = pipeline.scheduler.scale_model_input(latents, t)
+            
             noise_pred = pipeline.unet(
-                latents,
-                timestep,
+                latent_model_input,
+                t,
                 encoder_hidden_states=prompt_embeds,
                 added_cond_kwargs=added_cond_kwargs,
                 return_dict=False,
             )[0]
             latents = pipeline.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+            
+            # Capture latent after target_step
+            if step_idx + 1 == target_step:
+                target_latent = latents.clone()
+    
+    # Fallback if target_step >= num_steps
+    if target_latent is None:
+        target_latent = latents
     
     # Return the pair
     return {
         "prompt": prompt,
         "seed": seed,
+        "target_step": target_step,
         "pooled_embed": pooled_prompt_embeds.cpu().squeeze(0),  # (1280,)
-        "target_latent": latents.cpu().squeeze(0),  # (4, 64, 64)
+        "initial_latent": initial_latent.cpu().squeeze(0),  # (4, 64, 64) - the random noise
+        "target_latent": target_latent.cpu().squeeze(0),  # (4, 64, 64) - after target_step
     }
 
 

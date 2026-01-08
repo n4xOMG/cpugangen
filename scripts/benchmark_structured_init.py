@@ -98,7 +98,22 @@ def run_inference(
 ) -> tuple:
     """Run inference with optional structured initialization."""
     device = torch.device("cpu")
+    generator = torch.Generator(device="cpu").manual_seed(seed)
     
+    # If no smart init, use pipeline directly (reliable baseline)
+    if initializer is None:
+        start_time = time.time()
+        with torch.no_grad():
+            result = pipeline(
+                prompt=prompt,
+                num_inference_steps=num_steps,
+                guidance_scale=0.0,
+                generator=generator,
+            )
+        elapsed = time.time() - start_time
+        return result.images[0], elapsed
+    
+    # Smart init path: manual loop with custom initial latent
     # Encode prompt
     prompt_embeds, _, pooled_prompt_embeds, _ = pipeline.encode_prompt(
         prompt=prompt,
@@ -111,23 +126,15 @@ def run_inference(
     pipeline.scheduler.set_timesteps(num_steps, device=device)
     timesteps = pipeline.scheduler.timesteps
     
-    # Initialize latents
-    if initializer is not None:
-        # Smart initialization
-        latents = smart_latent_init(
-            initializer=initializer,
-            pooled_embed=pooled_prompt_embeds,
-            seed=seed,
-            init_noise_sigma=pipeline.scheduler.init_noise_sigma,
-            variation_scale=0.7,
-            structure_scale=0.2,
-            device="cpu",
-        )
-    else:
-        # Random initialization
-        generator = torch.Generator(device="cpu").manual_seed(seed)
-        latents = torch.randn((1, 4, 64, 64), generator=generator, dtype=torch.float32)
-        latents = latents * pipeline.scheduler.init_noise_sigma
+    # Smart initialization (predicts delta from step 1)
+    latents = smart_latent_init(
+        initializer=initializer,
+        pooled_embed=pooled_prompt_embeds,
+        seed=seed,
+        init_noise_sigma=pipeline.scheduler.init_noise_sigma,
+        delta_scale=1.0,  # Apply full predicted delta
+        device="cpu",
+    )
     
     # Prepare conditioning
     add_time_ids = pipeline._get_add_time_ids(
@@ -145,11 +152,13 @@ def run_inference(
     start_time = time.time()
     
     with torch.no_grad():
-        for t in tqdm(timesteps, desc=f"{num_steps}-step", leave=False):
-            timestep = torch.tensor([t], device=device, dtype=latents.dtype)
+        for i, t in enumerate(tqdm(timesteps, desc=f"{num_steps}-step", leave=False)):
+            # Scale model input (required for EulerDiscreteScheduler)
+            latent_model_input = pipeline.scheduler.scale_model_input(latents, t)
+            
             noise_pred = pipeline.unet(
-                latents,
-                timestep,
+                latent_model_input,
+                t,
                 encoder_hidden_states=prompt_embeds,
                 added_cond_kwargs=added_cond_kwargs,
                 return_dict=False,
