@@ -37,9 +37,13 @@ def save_validation_images(
     
     # Get a batch
     batch = next(iter(val_loader))
-    latents = batch['latent'][:num_samples].to(device)
-    targets = batch['target'][:num_samples].to(device)
-    filenames = batch['filename'][:num_samples]
+    
+    # Limit num_samples to actual batch size
+    actual_samples = min(num_samples, len(batch['latent']))
+    
+    latents = batch['latent'][:actual_samples].to(device)
+    targets = batch['target'][:actual_samples].to(device)
+    filenames = batch['filename'][:actual_samples]
     
     # Decode
     latents_unscaled = latents / 0.13025
@@ -48,7 +52,7 @@ def save_validation_images(
     # Create comparison grid
     # Format: [target, reconstructed] for each sample
     comparison = []
-    for i in range(num_samples):
+    for i in range(actual_samples):
         comparison.append(targets[i])
         comparison.append(reconstructed[i])
     
@@ -75,7 +79,7 @@ def save_validation_images(
     pairs_dir = output_dir / f"epoch{epoch:03d}"
     pairs_dir.mkdir(exist_ok=True)
     
-    for i in range(min(4, num_samples)):  # Save 4 individual pairs
+    for i in range(min(4, actual_samples)):  # Save up to 4 individual pairs
         # Target
         target_np = ((targets[i].cpu() + 1) / 2 * 255).clamp(0, 255).byte()
         target_np = target_np.permute(1, 2, 0).numpy()
