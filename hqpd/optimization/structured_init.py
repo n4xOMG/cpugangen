@@ -339,13 +339,16 @@ class StructuredInitTrainer:
         # Backward pass
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
         
         return {
             "loss": loss.item(),
             "loss_delta": loss_delta.item(),
             "loss_lowfreq": loss_lowfreq.item(),
+            "pred_std": predicted_delta_norm.std().item(),
+            "target_std": target_delta_norm.std().item(),
+            "grad_norm": grad_norm.item(),
         }
     
     def train_epoch(
@@ -356,6 +359,8 @@ class StructuredInitTrainer:
         """Train for one epoch."""
         total_loss = 0.0
         total_delta = 0.0
+        total_pred_std = 0.0
+        total_grad_norm = 0.0
         num_batches = 0
         
         for batch in dataloader:
@@ -369,6 +374,8 @@ class StructuredInitTrainer:
             metrics = self.train_step(pooled_embeds, initial_latents, target_latents)
             total_loss += metrics["loss"]
             total_delta += metrics["loss_delta"]
+            total_pred_std += metrics.get("pred_std", 0)
+            total_grad_norm += metrics.get("grad_norm", 0)
             num_batches += 1
             
             if verbose and num_batches % 10 == 0:
@@ -377,5 +384,7 @@ class StructuredInitTrainer:
         return {
             "avg_loss": total_loss / max(1, num_batches),
             "avg_loss_delta": total_delta / max(1, num_batches),
+            "avg_pred_std": total_pred_std / max(1, num_batches),
+            "avg_grad_norm": total_grad_norm / max(1, num_batches),
         }
 
