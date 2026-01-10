@@ -329,17 +329,15 @@ def validate(
     total_loss = 0.0
     
     for batch in tqdm(dataloader, desc="Validating"):
-        pixel_values = batch['pixel_values'].to(device)
-        prompts = batch['prompts']
-        
-        # Similar to training but without gradient computation
-        prompt_embeds, pooled_prompt_embeds = encode_prompts(
-            prompts, text_encoder_1, text_encoder_2,
-            tokenizer_1, tokenizer_2, device
-        )
-        
-        latents = vae.encode(pixel_values).latent_dist.sample()
-        latents = latents * vae.config.scaling_factor
+        # Get latents
+        if 'latents' in batch:
+            # Use cached latents
+            latents = batch['latents'].to(device)
+        else:
+            # Encode on the fly
+            pixel_values = batch['pixel_values'].to(device)
+            latents = vae.encode(pixel_values).latent_dist.sample()
+            latents = latents * vae.config.scaling_factor
         
         noise = torch.randn_like(latents)
         batch_size = latents.shape[0]
@@ -410,11 +408,12 @@ def main(args):
     print("Loading Models")
     print("="*60)
     
-    # Load teacher pipeline (Illustrious)
+    
+    # Load teacher pipeline (Illustrious) in FP16 to save memory
     print(f"Loading teacher model: {config['teacher']['model_id']}")
     teacher_pipe = StableDiffusionXLPipeline.from_pretrained(
         config['teacher']['model_id'],
-        torch_dtype=torch.float32,  # Train in FP32, inference can use FP16
+        torch_dtype=torch.float16,  # CRITICAL: Use FP16 for Teacher
     )
     
     teacher_unet = teacher_pipe.unet.to(device)
@@ -450,8 +449,17 @@ def main(args):
         except Exception:
             print("xformers not found, using standard attention (might OOM)")
 
-    # Share VAE and text encoders from teacher
-    vae = teacher_pipe.vae.to(device)
+    # Only load VAE to GPU if we are NOT using cached latents
+    # If using cached latents, we don't need VAE for encoding during train
+    use_cached_latents = config['data'].get('use_cached_latents', False)
+    
+    if not use_cached_latents:
+        vae = teacher_pipe.vae.to(device)
+    else:
+        # Keep VAE on CPU or don't move it
+        vae = teacher_pipe.vae
+        print("Using cached latents, VAE kept on CPU to save VRAM")
+
     vae.requires_grad_(False)
     
     text_encoder_1 = teacher_pipe.text_encoder.to(device)
