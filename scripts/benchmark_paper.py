@@ -56,8 +56,13 @@ class TinyVAEWrapper:
     
     def decode(self, latents, return_dict=True):
         """Decode latents to image, matching diffusers VAE interface."""
+        # Ensure latents are 4D (B, C, H, W)
+        if latents.dim() == 3:
+            latents = latents.unsqueeze(0)  # Add batch dimension
+        
         # Unscale latents (pipeline passes scaled latents)
         latents_unscaled = latents / self.scaling_factor
+
         
         # Decode
         decoded = self.decoder(latents_unscaled)
@@ -65,7 +70,7 @@ class TinyVAEWrapper:
         # Return in expected format
         if return_dict:
             return type('VAEOutput', (), {'sample': decoded})()
-        return decoded
+        return (decoded,)
     
     def to(self, device):
         self.decoder = self.decoder.to(device)
@@ -100,8 +105,19 @@ def load_custom_tinyvae(checkpoint_path: str = "checkpoints/tiny_vae/tiny_vae_de
     if not ckpt_path.exists():
         raise FileNotFoundError(f"TinyVAE checkpoint not found: {ckpt_path}")
     
-    # Load state dict
-    state_dict = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+    # Load checkpoint
+    checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    
+    # Handle both full training checkpoints and raw state dicts
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        # Full training checkpoint format
+        state_dict = checkpoint['model_state_dict']
+        epoch = checkpoint.get('epoch', 'unknown')
+        val_loss = checkpoint.get('val_loss', 'unknown')
+        print(f"  ✓ Loading from training checkpoint (epoch {epoch}, val_loss: {val_loss})")
+    else:
+        # Raw state dict
+        state_dict = checkpoint
     
     # Create decoder with same config as training
     decoder = TinyVAEDecoder(
@@ -138,6 +154,8 @@ def benchmark_configuration(
     num_steps: int,
     guidance_scale: float,
     warmup: int = 1,
+    output_dir: Path = None,
+    save_images: bool = True,
 ) -> Dict[str, Any]:
     """
     Benchmark a single configuration.
@@ -149,6 +167,8 @@ def benchmark_configuration(
         num_steps: Inference steps
         guidance_scale: CFG scale
         warmup: Warmup iterations
+        output_dir: Directory to save benchmark outputs
+        save_images: Whether to save generated images
     
     Returns:
         Dictionary with benchmark results
@@ -194,13 +214,20 @@ def benchmark_configuration(
     # Benchmark runs
     times = []
     memory_peaks = []
+    images = []  # Store generated images for saving
+    
+    # Create config-specific output dir for images
+    if save_images and output_dir:
+        config_safe_name = config_name.replace(" ", "_").replace(":", "").replace("+", "_")
+        images_dir = output_dir / "images" / config_safe_name
+        images_dir.mkdir(exist_ok=True, parents=True)
     
     print(f"\n🏃 Running {len(prompts)} benchmark iterations...")
     for i, prompt in enumerate(prompts):
         memory_before_iter = get_memory_usage()
         
         start = time.time()
-        _ = pipeline(
+        result = pipeline(
             prompt=prompt,
             num_inference_steps=num_steps,
             guidance_scale=guidance_scale,
@@ -213,7 +240,15 @@ def benchmark_configuration(
         times.append(elapsed)
         memory_peaks.append(memory_peak)
         
-        print(f"  [{i+1}/{len(prompts)}] {elapsed:.2f}s | Peak: {memory_peak:.2f} GB")
+        # Save generated image
+        if save_images and output_dir:
+            image = result.images[0]
+            images.append(image)
+            image_path = images_dir / f"prompt_{i+1}.png"
+            image.save(image_path)
+            print(f"  [{i+1}/{len(prompts)}] {elapsed:.2f}s | Peak: {memory_peak:.2f} GB | Saved: {image_path.name}")
+        else:
+            print(f"  [{i+1}/{len(prompts)}] {elapsed:.2f}s | Peak: {memory_peak:.2f} GB")
     
     # Get cache statistics if available (safely)
     cache_stats = None
@@ -590,6 +625,8 @@ def load_baseline_g() -> StableDiffusionXLPipeline:
     
     # Apply Lightning LoRA
     ckpt = hf_hub_download("ByteDance/SDXL-Lightning", "sdxl_lightning_4step_lora.safetensors")
+    print("  Applying Lightning LoRA...")
+    ckpt = hf_hub_download("ByteDance/SDXL-Lightning", "sdxl_lightning_4step_lora.safetensors")
     pipeline.load_lora_weights(load_file(ckpt))
     
     # Configure scheduler
@@ -599,8 +636,10 @@ def load_baseline_g() -> StableDiffusionXLPipeline:
         prediction_type="epsilon",
     )
     
-    pipeline.fuse_lora()
-    pipeline.unload_lora_weights()
+    # DEBUG: Disable fusion to see if it fixes permute error
+    print("  Skipping fuse_lora() for debugging...")
+    # pipeline.fuse_lora()
+    # pipeline.unload_lora_weights()
     
     pipeline = pipeline.to("cpu")
     
@@ -659,8 +698,9 @@ def load_baseline_h() -> StableDiffusionXLPipeline:
         prediction_type="epsilon",
     )
     
-    pipeline.fuse_lora()
-    pipeline.unload_lora_weights()
+    # Disable fusion for Custom VAE compatibility
+    # pipeline.fuse_lora()
+    # pipeline.unload_lora_weights()
     
     pipeline = pipeline.to("cpu")
     
@@ -739,6 +779,11 @@ def main():
         action="store_true",
         help="Skip Baseline A (original SDXL, very slow)",
     )
+    parser.add_argument(
+        "--only-vae",
+        action="store_true",
+        help="Only run VAE comparison tests (E, F, G, H) - skips memory-intensive baselines",
+    )
     
     args = parser.parse_args()
     
@@ -764,111 +809,41 @@ def main():
     print()
     
     results = []
+
+    # =========================================================================
+    # Comparison: Baseline vs Custom VAE
+    # =========================================================================
     
-    # Baseline A: Original Illustrious SDXL (50 steps)
-    if not args.skip_baseline_a:
-        try:
-            result_a = benchmark_configuration(
-                config_name="Baseline A: Original Illustrious",
-                load_fn=load_baseline_a,
-                prompts=prompts,
-                num_steps=20,
-                guidance_scale=7.5,
-                warmup=1,
-            )
-            results.append(result_a)
-        except Exception as e:
-            print(f"\n⚠️ Baseline A failed: {e}")
-            print("Continuing with other configurations...")
-    else:
-        print("\nℹ️ Skipping Baseline A (--skip-baseline-a)")
-    
-    # Baseline B: Illustrious + Lightning (4 steps)
+    # Configuration 1: Baseline + Lightning (Reference)
+    print("\nRunning Config 1: Baseline + Lightning...")
     result_b = benchmark_configuration(
-        config_name="Baseline B: Illustrious + Lightning",
+        config_name="Config 1: Baseline + Lightning",
         load_fn=load_baseline_b,
         prompts=prompts,
         num_steps=4,
-        guidance_scale=0.0,  # Lightning requires 0.0
+        guidance_scale=0.0,
         warmup=1,
+        output_dir=output_dir,
     )
     results.append(result_b)
     
-    # Baseline C: Hybrid (Illustrious + SSD-1B + Lightning)
-    result_c = benchmark_configuration(
-        config_name="Baseline C: Hybrid (+ SSD-1B UNet)",
-        load_fn=load_baseline_c,
-        prompts=prompts,
-        num_steps=4,
-        guidance_scale=0.0,
-        warmup=1,
-    )
-    results.append(result_c)
-    
-    # Baseline D: Full Optimization (+ Caching)
-    result_d = benchmark_configuration(
-        config_name="Baseline D: Full Optimization (+ Caching)",
-        load_fn=load_baseline_d,
-        prompts=prompts,
-        num_steps=4,
-        guidance_scale=0.0,
-        warmup=1,
-    )
-    results.append(result_d)
-    
-    # Baseline E: Hybrid + TAESD VAE
-    result_e = benchmark_configuration(
-        config_name="Baseline E: Hybrid + TAESD VAE",
-        load_fn=load_baseline_e,
-        prompts=prompts,
-        num_steps=4,
-        guidance_scale=0.0,
-        warmup=1,
-    )
-    results.append(result_e)
-    
-    # Baseline F: Full Optimization + TAESD VAE
-    result_f = benchmark_configuration(
-        config_name="Baseline F: Full Opt + TAESD VAE",
-        load_fn=load_baseline_f,
-        prompts=prompts,
-        num_steps=4,
-        guidance_scale=0.0,
-        warmup=1,
-    )
-    results.append(result_f)
-    
-    # Baseline G: Hybrid + Custom TinyVAE
+    # Configuration 2: Hybrid + Custom TinyVAE (Target)
     try:
+        print("\nRunning Config 2: Hybrid + Custom TinyVAE...")
         result_g = benchmark_configuration(
-            config_name="Baseline G: Hybrid + Custom TinyVAE",
+            config_name="Config 2: Hybrid + Custom TinyVAE",
             load_fn=load_baseline_g,
             prompts=prompts,
             num_steps=4,
             guidance_scale=0.0,
             warmup=1,
+            output_dir=output_dir,
         )
         results.append(result_g)
     except FileNotFoundError as e:
-        print(f"\n⚠️ Baseline G skipped: {e}")
+        print(f"\n⚠️ Config 2 skipped: {e}")
     except Exception as e:
-        print(f"\n⚠️ Baseline G failed: {e}")
-    
-    # Baseline H: Full Optimization + Custom TinyVAE
-    try:
-        result_h = benchmark_configuration(
-            config_name="Baseline H: Full Opt + Custom TinyVAE",
-            load_fn=load_baseline_h,
-            prompts=prompts,
-            num_steps=4,
-            guidance_scale=0.0,
-            warmup=1,
-        )
-        results.append(result_h)
-    except FileNotFoundError as e:
-        print(f"\n⚠️ Baseline H skipped: {e}")
-    except Exception as e:
-        print(f"\n⚠️ Baseline H failed: {e}")
+        print(f"\n⚠️ Config 2 failed: {e}")
     
     # Save raw results
     results_path = output_dir / "benchmark_results.json"
