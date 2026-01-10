@@ -4,11 +4,11 @@
     "comment": "Illustrious anime model (teacher)"
   },
   "student": {
-    "model_id": "segmind/SSD-1B",
-    "comment": "SSD-1B architecture (student)"
+    "model_id": "checkpoints/pruned_student_init",
+    "comment": "Illustrious anime model (student)"
   },
   "data": {
-    "use_cached_latents": false,
+    "use_cached_latents": true,
     "train_metadata": "data/splits/train_metadata.json",
     "val_metadata": "data/splits/val_metadata.json",
     "images_dir": "data/images",
