@@ -45,7 +45,17 @@ class ImageDataset(Dataset):
         item = self.metadata[idx]
         filename = item.get('preprocessed_filename', item.get('filename'))
         
-        img_path = self.images_dir / filename
+        # Check for bucket subfolder
+        bucket = item.get('bucket')
+        if bucket:
+            img_path = self.images_dir / bucket / filename
+        else:
+            img_path = self.images_dir / filename
+            
+        if not img_path.exists():
+            # Fallback for verification
+            raise FileNotFoundError(f"Image not found at {img_path}")
+            
         image = Image.open(img_path).convert('RGB')
         pixel_values = self.transform(image)
         
