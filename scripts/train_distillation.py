@@ -295,10 +295,14 @@ def train_one_epoch(
         
         # Log to wandb
         if step % config['logging']['log_every'] == 0:
+            # Helper to get item if tensor, else return value
+            def get_val(v):
+                return v.item() if hasattr(v, 'item') else v
+
             wandb.log({
                 'train/loss': loss.item(),
-                'train/output_loss': losses.get('output', 0).item(),
-                'train/feature_loss': losses.get('feature', 0).item(),
+                'train/output_loss': get_val(losses.get('output', 0)),
+                'train/feature_loss': get_val(losses.get('feature', 0)),
                 'train/epoch': epoch,
                 'train/step': step
             })
