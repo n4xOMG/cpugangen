@@ -283,7 +283,7 @@ def train_one_epoch(
         # Optimizer step
         scaler.step(optimizer)
         scaler.update()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)  # set_to_none=True saves memory
         
         # Logging
         total_loss += loss.item()
@@ -437,6 +437,19 @@ def main(args):
             torch_dtype=torch.float32
         ).to(device)
     
+    # Enable Gradient Checkpointing for Student
+    student_unet.enable_gradient_checkpointing()
+    print("Enabled gradient checkpointing for Student UNet")
+
+    # Enable Memory Efficient Attention (xformers or SDPA) if available
+    if torch.cuda.is_available():
+        try:
+            student_unet.enable_xformers_memory_efficient_attention()
+            teacher_unet.enable_xformers_memory_efficient_attention()
+            print("Enabled xformers memory efficient attention")
+        except Exception:
+            print("xformers not found, using standard attention (might OOM)")
+
     # Share VAE and text encoders from teacher
     vae = teacher_pipe.vae.to(device)
     vae.requires_grad_(False)
