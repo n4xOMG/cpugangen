@@ -422,11 +422,20 @@ def main(args):
     
     # Load student UNet (SSD-1B architecture)
     print(f"Loading student model: {config['student']['model_id']}")
-    student_pipe = StableDiffusionXLPipeline.from_pretrained(
-        config['student']['model_id'],
-        torch_dtype=torch.float32,
-    )
-    student_unet = student_pipe.unet.to(device)
+    try:
+        # Try loading as full pipeline first (for standard models like SSD-1B)
+        student_pipe = StableDiffusionXLPipeline.from_pretrained(
+            config['student']['model_id'],
+            torch_dtype=torch.float32,
+        )
+        student_unet = student_pipe.unet.to(device)
+    except OSError:
+        # Fallback to loading just the UNet (for pruned local checkpoints)
+        print("Pipeline load failed, trying generic UNet loading...")
+        student_unet = UNet2DConditionModel.from_pretrained(
+            config['student']['model_id'],
+            torch_dtype=torch.float32
+        ).to(device)
     
     # Share VAE and text encoders from teacher
     vae = teacher_pipe.vae.to(device)
