@@ -557,13 +557,25 @@ def main(args):
         feature_weight=config['loss']['feature_weight']
     )
     
-    optimizer = torch.optim.AdamW(
-        student_unet.parameters(),
-        lr=config['training']['learning_rate'],
-        weight_decay=config['training']['weight_decay']
-    )
-    
     scaler = GradScaler()
+    
+    # Optimizer creation with 8-bit Adam support
+    try:
+        import bitsandbytes as bnb
+        print("Using 8-bit AdamW optimizer (saves significantly more memory)")
+        optimizer = bnb.optim.AdamW8bit(
+            student_unet.parameters(),
+            lr=config['training']['learning_rate'],
+            weight_decay=config['training']['weight_decay']
+        )
+    except ImportError:
+        print("bitsandbytes not found, using standard AdamW (higher memory usage)")
+        print("Tip: `pip install bitsandbytes` to resolve OOM errors")
+        optimizer = torch.optim.AdamW(
+            student_unet.parameters(),
+            lr=config['training']['learning_rate'],
+            weight_decay=config['training']['weight_decay']
+        )
     
     # Training loop
     print("\n" + "="*60)
