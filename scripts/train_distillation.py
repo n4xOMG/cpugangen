@@ -369,19 +369,21 @@ def validate(
             "time_ids": add_time_ids
         }
         
-        teacher_output = teacher_unet(
-            noisy_latents, timesteps,
-            encoder_hidden_states=prompt_embeds,
-            added_cond_kwargs=added_cond_kwargs,
-            return_dict=False
-        )[0]
-        
-        student_output = student_unet(
-            noisy_latents, timesteps,
-            encoder_hidden_states=prompt_embeds,
-            added_cond_kwargs=added_cond_kwargs,
-            return_dict=False
-        )[0]
+        # Use autocast for validation to handle FP16 teacher
+        with autocast():
+            teacher_output = teacher_unet(
+                noisy_latents, timesteps,
+                encoder_hidden_states=prompt_embeds,
+                added_cond_kwargs=added_cond_kwargs,
+                return_dict=False
+            )[0]
+            
+            student_output = student_unet(
+                noisy_latents, timesteps,
+                encoder_hidden_states=prompt_embeds,
+                added_cond_kwargs=added_cond_kwargs,
+                return_dict=False
+            )[0]
         
         losses = distillation_loss(student_output, teacher_output)
         total_loss += losses['total'].item()
