@@ -333,6 +333,14 @@ def validate(
     total_loss = 0.0
     
     for batch in tqdm(dataloader, desc="Validating"):
+        prompts = batch['prompts']
+        
+        # Encode prompts (Moved OUTSIDE if/else so variables exist)
+        prompt_embeds, pooled_prompt_embeds = encode_prompts(
+            prompts, text_encoder_1, text_encoder_2,
+            tokenizer_1, tokenizer_2, device
+        )
+
         # Get latents
         if 'latents' in batch:
             # Use cached latents
