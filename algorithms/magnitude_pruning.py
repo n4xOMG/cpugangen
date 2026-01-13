@@ -81,11 +81,23 @@ class MagnitudePruner:
         # Compute magnitude
         weight_magnitude = torch.abs(weight)
         
-        # Flatten for percentile computation
+        # Flatten for threshold computation
         weight_flat = weight_magnitude.view(-1)
         
-        # Find threshold (percentile corresponding to sparsity)
-        threshold = torch.quantile(weight_flat, sparsity)
+        # Find threshold using kthvalue (more memory efficient than quantile)
+        # kthvalue finds the k-th smallest element
+        k = max(1, int(sparsity * weight_flat.numel()))
+        
+        # For very large tensors, use numpy as fallback
+        try:
+            threshold = torch.kthvalue(weight_flat, k).values
+        except RuntimeError:
+            # Fallback to numpy for extremely large tensors
+            import numpy as np
+            weight_np = weight_flat.cpu().numpy()
+            threshold = torch.tensor(np.percentile(weight_np, sparsity * 100))
+            if weight.is_cuda:
+                threshold = threshold.cuda()
         
         # Create mask (keep weights above threshold)
         mask = weight_magnitude > threshold
