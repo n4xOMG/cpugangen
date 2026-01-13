@@ -27,7 +27,9 @@ from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokeniz
 from tqdm.auto import tqdm
 import wandb
 
+
 from dataset_anime import AnimeDistillationDataset, collate_fn
+from feature_extractor import UNetFeatureExtractor, get_default_feature_layers
 
 
 class DistillationLoss(nn.Module):
@@ -43,13 +45,25 @@ class DistillationLoss(nn.Module):
         output_weight: float = 1.0,
         feature_weight: float = 0.5,
         attention_weight: float = 0.1,
-        use_attention: bool = False
+        use_attention: bool = False,
+        normalize_features: bool = True
     ):
         super().__init__()
         self.output_weight = output_weight
         self.feature_weight = feature_weight
         self.attention_weight = attention_weight
         self.use_attention = use_attention
+        self.normalize_features = normalize_features
+        
+        # Feature aligner for dimension mismatches
+        from feature_extractor import FeatureAligner
+        self.feature_aligner = FeatureAligner()
+    
+    def _normalize_feature(self, feat: torch.Tensor) -> torch.Tensor:
+        """L2-normalize feature maps channel-wise."""
+        # Normalize along channel dimension (dim=1 for NCHW format)
+        norm = torch.norm(feat, p=2, dim=1, keepdim=True) + 1e-8
+        return feat / norm
     
     def forward(
         self,
@@ -77,7 +91,7 @@ class DistillationLoss(nn.Module):
         losses['output'] = output_loss
         
         # 2. Feature matching loss (if features provided)
-        if student_features and teacher_features:
+        if student_features is not None and teacher_features is not None:
             feature_loss = 0.0
             num_features = 0
             
@@ -86,31 +100,36 @@ class DistillationLoss(nn.Module):
                     s_feat = student_features[key]
                     t_feat = teacher_features[key]
                     
-                    # Match feature dimensions if needed
-                    if s_feat.shape != t_feat.shape:
-                        # Interpolate to match spatial dimensions
-                        s_feat = F.interpolate(
-                            s_feat, 
-                            size=t_feat.shape[2:],
-                            mode='bilinear',
-                            align_corners=False
-                        )
+                    # Normalize features if requested
+                    if self.normalize_features:
+                        s_feat = self._normalize_feature(s_feat)
+                        t_feat = self._normalize_feature(t_feat)
                     
-                    feature_loss += F.mse_loss(s_feat, t_feat)
+                    # Align feature dimensions (spatial + channel)
+                    s_feat_aligned = self.feature_aligner(s_feat, t_feat, key)
+                    
+                    # Compute MSE loss
+                    feature_loss += F.mse_loss(s_feat_aligned, t_feat)
                     num_features += 1
             
             if num_features > 0:
                 feature_loss = feature_loss / num_features
                 losses['feature'] = feature_loss
+            else:
+                losses['feature'] = torch.tensor(0.0, device=student_output.device)
+        else:
+            # No features provided
+            losses['feature'] = torch.tensor(0.0, device=student_output.device)
         
         # 3. Total loss
         total_loss = (
-            self.output_weight * losses.get('output', 0.0) +
-            self.feature_weight * losses.get('feature', 0.0)
+            self.output_weight * losses['output'] +
+            self.feature_weight * losses['feature']
         )
         losses['total'] = total_loss
         
         return losses
+
 
 
 def encode_prompts(
@@ -184,6 +203,11 @@ def train_one_epoch(
     student_unet.train()
     teacher_unet.eval()  # Teacher always in eval mode
     
+    # Create feature extractors (outside loop for efficiency)
+    feature_layers = get_default_feature_layers('sdxl')
+    teacher_extractor = UNetFeatureExtractor(teacher_unet, feature_layers, normalize=False)
+    student_extractor = UNetFeatureExtractor(student_unet, feature_layers, normalize=False)
+    
     total_loss = 0.0
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch}")
     
@@ -242,29 +266,33 @@ def train_one_epoch(
         
         # Forward pass with mixed precision
         with autocast():
-            # Teacher forward (no grad)
+            # Teacher forward (no grad) with feature extraction
             with torch.no_grad():
-                teacher_output = teacher_unet(
+                teacher_output = teacher_extractor.extract(
                     noisy_latents,
                     timesteps,
                     encoder_hidden_states=prompt_embeds,
                     added_cond_kwargs=added_cond_kwargs,
                     return_dict=False
                 )[0]
+                teacher_features = teacher_extractor.get_features()
             
-            # Student forward
-            student_output = student_unet(
+            # Student forward with feature extraction
+            student_output = student_extractor.extract(
                 noisy_latents,
                 timesteps,
                 encoder_hidden_states=prompt_embeds,
                 added_cond_kwargs=added_cond_kwargs,
                 return_dict=False
             )[0]
+            student_features = student_extractor.get_features()
             
-            # Compute distillation loss
+            # Compute distillation loss with features
             losses = distillation_loss(
                 student_output,
-                teacher_output.detach()
+                teacher_output.detach(),
+                student_features=student_features,
+                teacher_features=teacher_features
             )
             
             loss = losses['total']
@@ -284,6 +312,14 @@ def train_one_epoch(
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)  # set_to_none=True saves memory
+        
+        # Update learning rate scheduler if exists (moved outside autocast)
+        if 'scheduler' in locals() and scheduler is not None:
+            scheduler.step()
+        
+        # Clear feature caches to save memory
+        teacher_extractor.clear()
+        student_extractor.clear()
         
         # Logging
         total_loss += loss.item()
@@ -330,9 +366,28 @@ def validate(
     student_unet.eval()
     teacher_unet.eval()
     
-    total_loss = 0.0
+    # Create feature extractors
+    feature_layers = get_default_feature_layers('sdxl')
+    teacher_extractor = UNetFeatureExtractor(teacher_unet, feature_layers, normalize=False)
+    student_extractor = UNetFeatureExtractor(student_unet, feature_layers, normalize=False)
     
-    for batch in tqdm(dataloader, desc="Validating"):
+    # Load LPIPS model for perceptual metrics (on first batch only)
+    try:
+        import lpips
+        lpips_model = lpips.LPIPS(net='vgg').to(device)
+        lpips_model.eval()
+        compute_lpips = True
+    except ImportError:
+        print("Warning: lpips not installed, skipping perceptual metrics")
+        compute_lpips = False
+    
+    total_loss = 0.0
+    total_lpips = 0.0
+    total_ssim = 0.0
+    lpips_count = 0
+    ssim_count = 0
+    
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Validating")):
         prompts = batch['prompts']
         
         # Encode prompts (Moved OUTSIDE if/else so variables exist)
@@ -371,29 +426,81 @@ def validate(
         
         # Use autocast for validation to handle FP16 teacher
         with autocast():
-            teacher_output = teacher_unet(
+            # Extract features from teacher
+            teacher_output = teacher_extractor.extract(
                 noisy_latents, timesteps,
                 encoder_hidden_states=prompt_embeds,
                 added_cond_kwargs=added_cond_kwargs,
                 return_dict=False
             )[0]
+            teacher_features = teacher_extractor.get_features()
             
-            student_output = student_unet(
+            # Extract features from student
+            student_output = student_extractor.extract(
                 noisy_latents, timesteps,
                 encoder_hidden_states=prompt_embeds,
                 added_cond_kwargs=added_cond_kwargs,
                 return_dict=False
             )[0]
+            student_features = student_extractor.get_features()
         
-        losses = distillation_loss(student_output, teacher_output)
+        # Compute distillation loss with features
+        losses = distillation_loss(
+            student_output, 
+            teacher_output,
+            student_features=student_features,
+            teacher_features=teacher_features
+        )
         total_loss += losses['total'].item()
+        
+        # Compute perceptual metrics on first 2 batches only (expensive)
+        if batch_idx < 2 and compute_lpips:
+            try:
+                # Decode latents to images
+                with torch.no_grad():
+                    # Scale latents back from noise prediction space
+                    student_images = vae.decode(student_output / vae.config.scaling_factor).sample
+                    teacher_images = vae.decode(teacher_output / vae.config.scaling_factor).sample
+                    
+                    # Clamp to [-1, 1] range for LPIPS
+                    student_images = torch.clamp(student_images, -1, 1)
+                    teacher_images = torch.clamp(teacher_images, -1, 1)
+                    
+                    # Compute LPIPS
+                    lpips_val = lpips_model(student_images, teacher_images).mean()
+                    total_lpips += lpips_val.item()
+                    lpips_count += 1
+                    
+                    # Compute SSIM (simple implementation)
+                    from torchmetrics.functional import structural_similarity_index_measure
+                    ssim_val = structural_similarity_index_measure(
+                        (student_images + 1) / 2,  # Scale to [0, 1]
+                        (teacher_images + 1) / 2,
+                        data_range=1.0
+                    )
+                    total_ssim += ssim_val.item()
+                    ssim_count += 1
+            except Exception as e:
+                print(f"Warning: Perceptual metrics failed: {e}")
+        
+        # Clear feature caches
+        teacher_extractor.clear()
+        student_extractor.clear()
     
     avg_loss = total_loss / len(dataloader)
     
-    wandb.log({
+    # Log to wandb
+    log_dict = {
         'val/loss': avg_loss,
         'val/epoch': epoch
-    })
+    }
+    
+    if lpips_count > 0:
+        log_dict['val/lpips'] = total_lpips / lpips_count
+    if ssim_count > 0:
+        log_dict['val/ssim'] = total_ssim / ssim_count
+    
+    wandb.log(log_dict)
     
     return avg_loss
 
@@ -590,6 +697,28 @@ def main(args):
             lr=config['training']['learning_rate'],
             weight_decay=config['training']['weight_decay']
         )
+    
+    # Create learning rate scheduler with warmup
+    warmup_steps = config['training'].get('warmup_steps', 0)
+    total_steps = len(train_loader) * config['training']['num_epochs']
+    
+    if warmup_steps > 0:
+        print(f"Using cosine LR scheduler with {warmup_steps} warmup steps")
+        
+        import math
+        def get_cosine_schedule_with_warmup(current_step: int) -> float:
+            """Cosine learning rate schedule with linear warmup."""
+            if current_step < warmup_steps:
+                # Linear warmup
+                return float(current_step) / float(max(1, warmup_steps))
+            # Cosine decay
+            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+        
+        from torch.optim.lr_scheduler import LambdaLR
+        scheduler = LambdaLR(optimizer, get_cosine_schedule_with_warmup)
+    else:
+        scheduler = None
     
     # Training loop
     print("\n" + "="*60)

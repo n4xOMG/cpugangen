@@ -23,6 +23,7 @@ import gc
 import json
 import sys
 import time
+import os
 from pathlib import Path
 from typing import Dict, Any, List
 import statistics
@@ -61,7 +62,8 @@ class TinyVAEWrapper:
             latents = latents.unsqueeze(0)  # Add batch dimension
         
         # Unscale latents (pipeline passes scaled latents)
-        latents_unscaled = latents / self.scaling_factor
+        # latents are already unscaled by pipeline before calling decode
+        latents_unscaled = latents
 
         
         # Decode
@@ -132,6 +134,171 @@ def load_custom_tinyvae(checkpoint_path: str = "checkpoints/tiny_vae/tiny_vae_de
     print(f"  ✓ Loaded custom TinyVAE from: {ckpt_path}")
     
     return TinyVAEWrapper(decoder)
+
+
+
+def load_custom_student(checkpoint_path: str, base_model: str = "martineux/janku6") -> StableDiffusionXLPipeline:
+    """
+    Load pipeline with a custom student UNet checkpoint.
+    """
+    print(f"Loading Custom Student UNet from {checkpoint_path}...")
+    
+    # Load base pipeline
+    pipeline = StableDiffusionXLPipeline.from_pretrained(
+        base_model,
+        torch_dtype=torch.float32,
+    )
+
+    # Load checkpoint
+    print(f"  Loading checkpoint: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    
+    # Handle state dict structure
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+        print(f"  ✓ Loaded from training checkpoint (Epoch {checkpoint.get('epoch', '?')}, Loss: {checkpoint.get('val_loss', '?'):.4f})")
+    else:
+        state_dict = checkpoint
+        print("  ✓ Loaded from raw state dict")
+        
+    # Initialize student UNet (SSD-1B config)
+    # OPTIMIZATION: Load CONFIG ONLY, don't download weights
+    print("  Initializing student architecture...")
+    student_config = None
+    
+    # Strategy 1: strict config from checkpoint
+    if isinstance(checkpoint, dict) and 'config' in checkpoint:
+        try:
+            student_init_path = checkpoint['config']['student']['model_id']
+            if Path(student_init_path).exists():
+                print(f"  Using config from training init: {student_init_path}")
+                student_config = UNet2DConditionModel.load_config(student_init_path, subfolder="unet" if "unet" in os.listdir(student_init_path) else None)
+        except Exception as e:
+            print(f"  Could not load config from checkpoint metadata: {e}")
+
+    # Strategy 2: Download/Load SSD-1B config
+    if student_config is None:
+        try:
+            print("  Loading standard SSD-1B config...")
+            student_config = UNet2DConditionModel.load_config("segmind/SSD-1B", subfolder="unet")
+        except Exception as e:
+            print(f"  ⚠️ Could not download SSD-1B config: {e}")
+
+    if student_config:
+        student_unet = UNet2DConditionModel.from_config(student_config)
+        print("  ✓ Initialized SSD-1B architecture")
+    else:
+        raise RuntimeError(
+            "CRITICAL FAILURE: Could not load SSD-1B configuration!\n"
+            "Cannot fall back to Teacher Config because architecture mismatch would cause garbage output.\n"
+            "Please ensure 'checkpoints/pruned_student_init' exists or internet is available."
+        )
+        
+    # Load weights
+    missing, unexpected = student_unet.load_state_dict(state_dict, strict=False)
+    if len(missing) > 0:
+        print(f"  ⚠️ Warning: Missing keys: {len(missing)} (expected if architecture differs)")
+    if len(unexpected) > 0:
+        print(f"  ⚠️ Warning: Unexpected keys: {len(unexpected)}")
+        
+    pipeline.unet = student_unet
+    print("  ✓ Custom Student UNet loaded successfully")
+    
+    pipeline = pipeline.to("cpu")
+    return pipeline
+
+
+def load_custom_student_tinyvae_lightning(checkpoint_path: str) -> StableDiffusionXLPipeline:
+    """Load custom student + Custom TinyVAE + Lightning LoRA."""
+    # 1. Load Student
+    pipeline = load_custom_student(checkpoint_path)
+    
+    # 2. Swap VAE with Custom TinyVAE
+    print("  Swapping VAE with Custom TinyVAE...")
+    try:
+        custom_vae = load_custom_tinyvae()
+        pipeline.vae = custom_vae
+        print("  ✓ VAE replaced with Custom TinyVAE")
+    except Exception as e:
+        print(f"  ⚠️ Failed to load Custom TinyVAE: {e}")
+        print("  Keeping original VAE")
+    
+    # 3. Apply Lightning LoRA
+    print("  Applying Lightning LoRA for speed...")
+    ckpt = hf_hub_download("ByteDance/SDXL-Lightning", "sdxl_lightning_4step_lora.safetensors")
+    pipeline.load_lora_weights(load_file(ckpt))
+    pipeline.fuse_lora()
+    
+    # Scheduler
+    pipeline.scheduler = EulerDiscreteScheduler.from_config(
+        pipeline.scheduler.config,
+        timestep_spacing="trailing",
+        prediction_type="epsilon",
+    )
+    
+    return pipeline
+
+
+
+def load_custom_student_original_vae(checkpoint_path: str) -> StableDiffusionXLPipeline:
+    """Load custom student + Original VAE + Lightning LoRA (Diagnostic)."""
+    # 1. Load Student
+    pipeline = load_custom_student(checkpoint_path)
+    
+    # 2. Keep Original VAE (Implicit)
+    print("  Keeping Original VAE for diagnosis...")
+    
+    # 3. Apply Lightning LoRA
+    print("  Applying Lightning LoRA for speed...")
+    ckpt = hf_hub_download("ByteDance/SDXL-Lightning", "sdxl_lightning_4step_lora.safetensors")
+    pipeline.load_lora_weights(load_file(ckpt))
+    pipeline.fuse_lora()
+    
+    # Scheduler
+    pipeline.scheduler = EulerDiscreteScheduler.from_config(
+        pipeline.scheduler.config,
+        timestep_spacing="trailing",
+        prediction_type="epsilon",
+    )
+    
+    return pipeline
+
+
+
+def load_base_unet_custom_vae() -> StableDiffusionXLPipeline:
+    """Load Base UNet + Custom VAE + Lightning LoRA (Diagnostic)."""
+    print("Loading Base UNet + Custom VAE...")
+    
+    # 1. Load Base Pipeline (Illustrious)
+    pipeline = StableDiffusionXLPipeline.from_pretrained(
+        "martineux/janku6",
+        torch_dtype=torch.float32,
+    )
+    
+    # 2. Swap VAE with Custom TinyVAE
+    print("  Swapping VAE with Custom TinyVAE...")
+    try:
+        custom_vae = load_custom_tinyvae()
+        pipeline.vae = custom_vae
+        print("  ✓ VAE replaced with Custom TinyVAE")
+    except Exception as e:
+        print(f"  ⚠️ Failed to load Custom TinyVAE: {e}")
+        
+    # 3. Apply Lightning LoRA
+    print("  Applying Lightning LoRA for speed...")
+    ckpt = hf_hub_download("ByteDance/SDXL-Lightning", "sdxl_lightning_4step_lora.safetensors")
+    pipeline.load_lora_weights(load_file(ckpt))
+    pipeline.fuse_lora()
+    
+    # Scheduler
+    pipeline.scheduler = EulerDiscreteScheduler.from_config(
+        pipeline.scheduler.config,
+        timestep_spacing="trailing",
+        prediction_type="epsilon",
+    )
+    
+    pipeline = pipeline.to("cpu")
+    return pipeline
 
 
 def clear_memory():
@@ -637,9 +804,8 @@ def load_baseline_g() -> StableDiffusionXLPipeline:
     )
     
     # DEBUG: Disable fusion to see if it fixes permute error
-    print("  Skipping fuse_lora() for debugging...")
-    # pipeline.fuse_lora()
-    # pipeline.unload_lora_weights()
+    pipeline.fuse_lora()
+    pipeline.unload_lora_weights()
     
     pipeline = pipeline.to("cpu")
     
@@ -827,25 +993,60 @@ def main():
     )
     results.append(result_b)
     
-    # Configuration 2: Hybrid + Custom TinyVAE (Target)
+    
+    # Configuration 2: Custom Student + Custom TinyVAE (Target)
+    student_ckpt = "checkpoints/best_student_unet.pt"
+    if Path(student_ckpt).exists():
+        print(f"\nRunning Config 2: Custom Student + Custom TinyVAE ({student_ckpt})...")
+        try:
+            result_s = benchmark_configuration(
+                config_name="Config 2: Custom Student + Custom TinyVAE",
+                load_fn=lambda: load_custom_student_tinyvae_lightning(student_ckpt),
+                prompts=prompts,
+                num_steps=4,
+                guidance_scale=0.0,
+                warmup=1,
+                output_dir=output_dir,
+            )
+            results.append(result_s)
+        except Exception as e:
+            print(f"⚠️ Config 2 failed: {e}")
+    else:
+        print(f"\n⚠️ Config 2 skipped: {student_ckpt} not found")
+
+    # Configuration 3: Custom Student + Original VAE (Diagnostic)
+    if Path(student_ckpt).exists():
+        print(f"\nRunning Config 3: Custom Student + Original VAE (Diagnostic)...")
+        try:
+            result_d = benchmark_configuration(
+                config_name="Config 3: Custom Student + Original VAE",
+                load_fn=lambda: load_custom_student_original_vae(student_ckpt),
+                prompts=prompts,
+                num_steps=4,
+                guidance_scale=0.0,
+                warmup=1,
+                output_dir=output_dir,
+            )
+            results.append(result_d)
+        except Exception as e:
+            print(f"⚠️ Config 3 failed: {e}")
+
+    # Configuration 4: Base UNet + Custom VAE (Diagnostic)
+    print(f"\nRunning Config 4: Base UNet + Custom VAE (Diagnostic)...")
     try:
-        print("\nRunning Config 2: Hybrid + Custom TinyVAE...")
-        result_g = benchmark_configuration(
-            config_name="Config 2: Hybrid + Custom TinyVAE",
-            load_fn=load_baseline_g,
+        result_vae_chk = benchmark_configuration(
+            config_name="Config 4: Base UNet + Custom VAE",
+            load_fn=load_base_unet_custom_vae,
             prompts=prompts,
             num_steps=4,
             guidance_scale=0.0,
             warmup=1,
             output_dir=output_dir,
         )
-        results.append(result_g)
-    except FileNotFoundError as e:
-        print(f"\n⚠️ Config 2 skipped: {e}")
+        results.append(result_vae_chk)
     except Exception as e:
-        print(f"\n⚠️ Config 2 failed: {e}")
-    
-    # Save raw results
+        print(f"⚠️ Config 4 failed: {e}")
+
     results_path = output_dir / "benchmark_results.json"
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2, default=str)
