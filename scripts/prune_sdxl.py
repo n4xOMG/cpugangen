@@ -122,6 +122,24 @@ def prune_sdxl(
         tokenizer2_path = os.path.join(output_path, "tokenizer_2")
         pipeline.tokenizer_2.save_pretrained(tokenizer2_path)
     
+    # Save model_index.json (required for loading pipeline)
+    print(f"  ✅ Saving model index...")
+    model_index = {
+        "_class_name": "StableDiffusionXLPipeline",
+        "_diffusers_version": "0.21.0",
+        "text_encoder": ["transformers", "CLIPTextModel"],
+        "text_encoder_2": ["transformers", "CLIPTextModelWithProjection"],
+        "tokenizer": ["transformers", "CLIPTokenizer"],
+        "tokenizer_2": ["transformers", "CLIPTokenizer"],
+        "unet": ["diffusers", "UNet2DConditionModel"],
+        "scheduler": ["diffusers", "EulerDiscreteScheduler"],
+        "vae": ["diffusers", "AutoencoderKL"]
+    }
+    
+    model_index_path = os.path.join(output_path, "model_index.json")
+    with open(model_index_path, 'w') as f:
+        json.dump(model_index, f, indent=2)
+    
     # Save pruning metadata
     import json
     metadata = {
