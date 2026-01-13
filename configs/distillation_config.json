@@ -24,19 +24,30 @@
   "training": {
     "num_epochs": 10,
     "batch_size": 1,
-    "learning_rate": 1e-5,
+    "learning_rate": 5e-6,
+    "warmup_steps": 500,
     "weight_decay": 0.01,
     "max_grad_norm": 1.0,
     "num_workers": 4,
     "save_every": 2,
     "output_dir": "checkpoints/anime_student",
-    "comment": "Batch size 1 for 3090 24GB. Increase if you have more VRAM."
+    "comment": "Lower LR with warmup for stable training. Batch size 1 for 3090 24GB."
   },
   "loss": {
     "output_weight": 1.0,
-    "feature_weight": 0.5,
+    "feature_weight": 2.0,
     "attention_weight": 0.0,
-    "comment": "Feature weight helps student match teacher's intermediate representations"
+    "normalize_features": true,
+    "comment": "Feature weight increased to 2.0 to emphasize intermediate representations"
+  },
+  "feature_extraction": {
+    "layers": [
+      "down_blocks.1",
+      "down_blocks.2",
+      "up_blocks.0",
+      "up_blocks.1"
+    ],
+    "comment": "Extract from mid-level semantic blocks for best quality-performance tradeoff"
   },
   "logging": {
     "use_wandb": true,
