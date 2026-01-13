@@ -1,0 +1,28 @@
+{
+  "model": "checkpoints/pruned_sdxl_47.5_35",
+  "optimization": {
+    "initial_schedule": "edm",
+    "num_steps": 10,
+    "max_iterations": 100,
+    "num_candidates": 20,
+    "neighborhood_size": 0.15,
+    "convergence_threshold": 1e-4,
+    "hierarchical": true,
+    "target_steps": [10, 20]
+  },
+  "klub_estimation": {
+    "c": 0.1,
+    "num_quadrature_points": 100
+  },
+  "output": "configs/optimal_schedule.json",
+  "comments": {
+    "model": "Path to pruned model (or unpruned for baseline)",
+    "initial_schedule": "edm - Karras et al. 2022 schedule (best baseline)",
+    "num_steps": "Start with 10 steps, then hierarchically expand to 20",
+    "max_iterations": "100 iterations should be sufficient for convergence",
+    "num_candidates": "20 candidates per timestep (good balance)",
+    "neighborhood_size": "15% neighborhood (allows significant adjustments)",
+    "c": "Regularization constant from AYS paper formula",
+    "hierarchical": "10->20 step optimization (as described in user's requirements)"
+  }
+}
