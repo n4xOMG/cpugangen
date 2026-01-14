@@ -256,12 +256,23 @@ def main():
         # Load Lightning LoRA
         print("Loading SDXL-Lightning LoRA...")
         try:
+            # Download LoRA checkpoint
             lightning_ckpt = hf_hub_download(
                 "ByteDance/SDXL-Lightning",
                 f"sdxl_lightning_{args.lightning_steps}step_lora.safetensors"
             )
-            pipeline.load_lora_weights(load_file(lightning_ckpt))
+            
+            # Load LoRA weights (pass path, not loaded tensors!)
+            pipeline.load_lora_weights(lightning_ckpt)
             pipeline.fuse_lora()
+            
+            # For Lightning, also need to use EulerDiscreteScheduler
+            from diffusers import EulerDiscreteScheduler
+            pipeline.scheduler = EulerDiscreteScheduler.from_config(
+                pipeline.scheduler.config,
+                timestep_spacing="trailing"
+            )
+            
             print("✅ Lightning LoRA loaded\n")
         except Exception as e:
             print(f"⚠️  Could not load Lightning LoRA: {e}")
