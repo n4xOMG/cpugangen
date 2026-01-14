@@ -80,13 +80,41 @@ class PASPipeline:
         # Reset controller state
         self.controller.reset()
         
-        # Encode prompt
-        prompt_embeds, negative_prompt_embeds = self.pipeline.encode_prompt(
+        # Encode prompt (SDXL-specific)
+        (
+            prompt_embeds,
+            negative_prompt_embeds,
+            pooled_prompt_embeds,
+            negative_pooled_prompt_embeds,
+        ) = self.pipeline.encode_prompt(
             prompt=prompt,
+            prompt_2=prompt,
             device=self.device,
             num_images_per_prompt=1,
-            do_classifier_free_guidance=guidance_scale > 1.0
+            do_classifier_free_guidance=guidance_scale > 1.0,
+            negative_prompt=None,
+            negative_prompt_2=None,
         )
+        
+        # Prepare SDXL augmentation kwargs
+        original_size = (1024, 1024)
+        crops_coords_top_left = (0, 0)
+        target_size = (1024, 1024)
+        
+        add_time_ids = list(original_size + crops_coords_top_left + target_size)
+        add_time_ids = torch.tensor([add_time_ids], dtype=torch.float32, device=self.device)
+        
+        # For CFG, concatenate
+        if guidance_scale > 1.0:
+            add_time_ids = torch.cat([add_time_ids, add_time_ids], dim=0)
+            add_text_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
+        else:
+            add_text_embeds = pooled_prompt_embeds
+        
+        added_cond_kwargs = {
+            "text_embeds": add_text_embeds,
+            "time_ids": add_time_ids
+        }
         
         # Prepare latents
         latents = torch.randn(
@@ -106,16 +134,20 @@ class PASPipeline:
             latent_model_input = torch.cat([latents] * 2) if guidance_scale > 1.0 else latents
             
             # Prepare encoder hidden states
-            encoder_hidden_states = torch.cat([negative_prompt_embeds, prompt_embeds]) if guidance_scale > 1.0 else prompt_embeds
+            if guidance_scale > 1.0:
+                encoder_hidden_states = torch.cat([negative_prompt_embeds, prompt_embeds])
+            else:
+                encoder_hidden_states = prompt_embeds
             
-            # PAS-controlled U-Net execution
+            # PAS-controlled U-Net execution (need to modify execute_step to accept added_cond_kwargs)
             noise_pred = self.controller.execute_step(
                 unet=self.pipeline.unet,
                 latent_model_input=latent_model_input,
                 t=t,
                 encoder_hidden_states=encoder_hidden_states,
                 current_step=step_idx,
-                total_steps=num_inference_steps
+                total_steps=num_inference_steps,
+                added_cond_kwargs=added_cond_kwargs  # Pass SDXL kwargs
             )
             
             # Classifier-free guidance

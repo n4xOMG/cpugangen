@@ -137,13 +137,40 @@ class ShiftScoreAnalyzer:
                 
                 # Custom denoising loop to capture activations
                 with torch.no_grad():
-                    # Encode prompt
-                    prompt_embeds = pipeline.encode_prompt(
+                    # Encode prompt (SDXL-specific)
+                    (
+                        prompt_embeds,
+                        negative_prompt_embeds,
+                        pooled_prompt_embeds,
+                        negative_pooled_prompt_embeds,
+                    ) = pipeline.encode_prompt(
                         prompt=prompt,
+                        prompt_2=prompt,  # Use same for both
                         device=self.device,
                         num_images_per_prompt=1,
-                        do_classifier_free_guidance=True
+                        do_classifier_free_guidance=True,
+                        negative_prompt=None,
+                        negative_prompt_2=None,
                     )
+                    
+                    # Prepare SDXL augmentation kwargs
+                    # Create time_ids (original size, crops, target size)
+                    original_size = (1024, 1024)
+                    crops_coords_top_left = (0, 0)
+                    target_size = (1024, 1024)
+                    
+                    add_time_ids = list(original_size + crops_coords_top_left + target_size)
+                    add_time_ids = torch.tensor([add_time_ids], dtype=torch.float32, device=self.device)
+                    
+                    # For CFG, concatenate
+                    add_time_ids = torch.cat([add_time_ids, add_time_ids], dim=0)
+                    
+                    # Prepare added_cond_kwargs
+                    add_text_embeds = pooled_prompt_embeds
+                    added_cond_kwargs = {
+                        "text_embeds": torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0),
+                        "time_ids": add_time_ids
+                    }
                     
                     # Prepare latents
                     latents = torch.randn(
@@ -164,11 +191,15 @@ class ShiftScoreAnalyzer:
                         # Expand latents for CFG
                         latent_model_input = torch.cat([latents] * 2)
                         
-                        # Predict noise
+                        # Concatenate prompt embeds for CFG
+                        encoder_hidden_states = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+                        
+                        # Predict noise with SDXL-specific kwargs
                         noise_pred = unet(
                             latent_model_input,
                             t,
-                            encoder_hidden_states=prompt_embeds[0],
+                            encoder_hidden_states=encoder_hidden_states,
+                            added_cond_kwargs=added_cond_kwargs,
                             return_dict=False
                         )[0]
                         

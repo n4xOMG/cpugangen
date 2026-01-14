@@ -123,7 +123,8 @@ class PASController:
         t: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         current_step: int,
-        total_steps: int
+        total_steps: int,
+        added_cond_kwargs: dict = None  # SDXL augmentation kwargs
     ) -> torch.Tensor:
         """
         Execute U-Net with PAS logic.
@@ -135,6 +136,7 @@ class PASController:
             encoder_hidden_states: Text embeddings
             current_step: Current step index
             total_steps: Total steps
+            added_cond_kwargs: SDXL-specific kwargs (text_embeds, time_ids)
             
         Returns:
             Noise prediction
@@ -150,6 +152,7 @@ class PASController:
                 latent_model_input,
                 t,
                 encoder_hidden_states=encoder_hidden_states,
+                added_cond_kwargs=added_cond_kwargs,
                 return_dict=False
             )[0]
             
@@ -173,7 +176,8 @@ class PASController:
                 latent_model_input,
                 t,
                 encoder_hidden_states,
-                num_blocks
+                num_blocks,
+                added_cond_kwargs  # Pass SDXL kwargs
             )
             
             self.partial_unet_calls += 1
@@ -186,7 +190,8 @@ class PASController:
         latent_model_input: torch.Tensor,
         t: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        num_blocks: int
+        num_blocks: int,
+        added_cond_kwargs: dict = None
     ) -> torch.Tensor:
         """
         Execute only first num_blocks of U-Net.
@@ -202,6 +207,7 @@ class PASController:
             t: Timestep
             encoder_hidden_states: Text embeddings
             num_blocks: Number of blocks to execute
+            added_cond_kwargs: SDXL-specific kwargs
             
         Returns:
             Noise prediction (approximated)
@@ -226,6 +232,7 @@ class PASController:
                 latent_model_input,
                 t,
                 encoder_hidden_states=encoder_hidden_states,
+                added_cond_kwargs=added_cond_kwargs,
                 return_dict=False
             )[0]
     
