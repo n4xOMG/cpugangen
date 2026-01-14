@@ -61,10 +61,11 @@ class TinyVAEWrapper:
         if latents.dim() == 3:
             latents = latents.unsqueeze(0)  # Add batch dimension
         
-        # Unscale latents (pipeline passes scaled latents)
-        # latents are already unscaled by pipeline before calling decode
-        latents_unscaled = latents
-
+        # CRITICAL FIX: Unscale latents before decoding!
+        # The pipeline passes SCALED latents (multiplied by scaling_factor)
+        # But TinyVAE was trained on UNSCALED latents (see train_vae_decoder.py line 136)
+        # Must divide by scaling_factor to match training distribution
+        latents_unscaled = latents / self.scaling_factor
         
         # Decode
         decoded = self.decoder(latents_unscaled)
@@ -235,6 +236,25 @@ def load_custom_student_tinyvae_lightning(checkpoint_path: str) -> StableDiffusi
         timestep_spacing="trailing",
         prediction_type="epsilon",
     )
+    
+    return pipeline
+
+
+def load_custom_student_no_lightning(checkpoint_path: str) -> StableDiffusionXLPipeline:
+    """Load custom student WITHOUT Lightning LoRA (for diagnosis).
+    
+    The student was trained to mimic the BASE teacher (without Lightning LoRA),
+    so applying Lightning LoRA causes a fundamental mismatch and noise output.
+    """
+    print(f"Loading Custom Student UNet (NO Lightning LoRA) from {checkpoint_path}...")
+    
+    # Load base pipeline with student UNet
+    pipeline = load_custom_student(checkpoint_path)
+    
+    # DON'T apply Lightning LoRA - student wasn't trained with it!
+    # Keep the original scheduler from the base model
+    print("  ⚠️ NOT applying Lightning LoRA (student wasn't trained with it)")
+    print("  Using original scheduler for proper denoising")
     
     return pipeline
 
@@ -1013,6 +1033,23 @@ def main():
             print(f"⚠️ Config 2 failed: {e}")
     else:
         print(f"\n⚠️ Config 2 skipped: {student_ckpt} not found")
+
+    # Configuration 2B: Custom Student WITHOUT Lightning LoRA (DIAGNOSTIC)
+    if Path(student_ckpt).exists():
+        print(f"\nRunning Config 2B: Custom Student WITHOUT Lightning (Diagnostic)...")
+        try:
+            result_no_lora = benchmark_configuration(
+                config_name="Config 2B: Custom Student (NO Lightning)",
+                load_fn=lambda: load_custom_student_no_lightning(student_ckpt),
+                prompts=prompts,
+                num_steps=20,  # Need more steps without Lightning
+                guidance_scale=7.5,  # Standard CFG
+                warmup=1,
+                output_dir=output_dir,
+            )
+            results.append(result_no_lora)
+        except Exception as e:
+            print(f"⚠️ Config 2B failed: {e}")
 
     # Configuration 3: Custom Student + Original VAE (Diagnostic)
     if Path(student_ckpt).exists():
