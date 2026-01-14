@@ -56,8 +56,13 @@ class ShiftScoreAnalyzer:
         for i, up_block in enumerate(unet.up_blocks):
             def make_hook(block_idx):
                 def hook(module, input, output):
-                    # Store input to upsampling block
-                    self.hooked_activations[f'up_block_{block_idx}'] = input[0].detach().cpu()
+                    # Store output of upsampling block (more reliable than input)
+                    # Output is the activation after processing
+                    if isinstance(output, torch.Tensor):
+                        self.hooked_activations[f'up_block_{block_idx}'] = output.detach().cpu()
+                    elif isinstance(output, tuple) and len(output) > 0:
+                        # If output is tuple, take first element
+                        self.hooked_activations[f'up_block_{block_idx}'] = output[0].detach().cpu()
                 return hook
             
             handle = up_block.register_forward_hook(make_hook(i))
