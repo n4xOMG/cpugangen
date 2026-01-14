@@ -9,9 +9,10 @@
   },
   "data": {
     "use_cached_latents": true,
-    "train_metadata": "data/splits/train_metadata.json",
-    "val_metadata": "data/splits/val_metadata.json",
-    "images_dir": "data/images",
+    "train_metadata": "data/preprocessed/train/metadata.json",
+    "val_metadata": "data/preprocessed/val/metadata.json",
+    "images_dir_train": "data/preprocessed/train",
+    "images_dir_val": "data/preprocessed/val",
     "train_latent_metadata": "data/cached_latents/train/latent_metadata.json",
     "train_latents_dir": "data/cached_latents/train/latents",
     "val_latent_metadata": "data/cached_latents/val/latent_metadata.json",
@@ -19,7 +20,7 @@
     "resolution": 1024,
     "max_tags": 75,
     "min_tag_score": 0.35,
-    "comment": "Set use_cached_latents=true to use pre-cached latents for faster training"
+    "comment": "Using bucket-preprocessed images. Set use_cached_latents=true to use pre-cached latents for faster training"
   },
   "training": {
     "num_epochs": 10,
