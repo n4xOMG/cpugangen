@@ -1,0 +1,28 @@
+{
+  "base_model": "martineux/janku6",
+  "pruning": {
+    "text_encoder_1_sparsity": 0.475,
+    "text_encoder_2_sparsity": 0.475,
+    "unet_sparsity": 0.35,
+    "method": "magnitude",
+    "structured": false,
+    "skip_layers": [
+      "embeddings",
+      "layernorm",
+      "final_layer_norm",
+      "time_embedding",
+      "norm",
+      "conv_in",
+      "conv_out"
+    ]
+  },
+  "output": "checkpoints/pruned_sdxl_47.5_35",
+  "device": "cpu",
+  "torch_dtype": "float32",
+  "comments": {
+    "model": "Illustrious (martineux/janku6) - Anime-tuned SDXL",
+    "text_encoder_sparsity": "47.5% - Optimal from paper (arxiv:2411.15113)",
+    "unet_sparsity": "35% - Optimal from paper",
+    "skip_layers": "Skip normalization, embedding, and I/O layers (preserve model structure)"
+  }
+}

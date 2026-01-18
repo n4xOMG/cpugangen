@@ -1,0 +1,57 @@
+{
+  "teacher": {
+    "model_id": "martineux/janku6",
+    "comment": "BASE Illustrious - NO Lightning LoRA (we want 20-step quality)"
+  },
+  
+  "student": {
+    "model_id": "segmind/SSD-1B",
+    "comment": "Smaller architecture - will learn to match teacher in fewer steps"
+  },
+  
+  "data": {
+    "use_cached_latents": true,
+    "train_metadata": "data/preprocessed/train/metadata.json",
+    "val_metadata": "data/preprocessed/val/metadata.json",
+    "images_dir_train": "data/preprocessed/train",
+    "images_dir_val": "data/preprocessed/val",
+    "train_latent_metadata": "data/cached_latents/train/latent_metadata.json",
+    "train_latents_dir": "data/cached_latents/train/latents",
+    "val_latent_metadata": "data/cached_latents/val/latent_metadata.json",
+    "val_latents_dir": "data/cached_latents/val/latents",
+    "resolution": 1024,
+    "max_tags": 75,
+    "min_tag_score": 0.35,
+    "comment": "Using bucket-preprocessed images split into train/val folders. Each folder contains bucket subfolders (1024x1024/, 1152x896/, etc.)"
+  },
+  
+  "training": {
+    "batch_size": 1,
+    "num_epochs": 15,
+    "learning_rate": 5e-6,
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0,
+    "num_workers": 0,
+    "save_every": 3,
+    
+    "teacher_steps": 20,
+    "student_steps": 4,
+    
+    "comment_steps": "Teacher runs 20 steps (high quality), student learns to match in 4 steps!"
+  },
+  
+  "loss": {
+    "consistency_weight": 1.0,
+    "feature_weight": 0.0,
+    "comment": "Focus on final output consistency. Feature matching optional for stability."
+  },
+  
+  "logging": {
+    "use_wandb": true,
+    "wandb_project": "anime-consistency-distillation",
+    "run_name": "ssd1b_4step_20step_quality",
+    "log_every": 10
+  },
+  
+  "comment": "Consistency distillation: Student achieves 20-step teacher quality in just 4 steps!"
+}

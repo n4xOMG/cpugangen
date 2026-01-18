@@ -1,0 +1,48 @@
+{
+  "model": {
+    "base_channels": 64,
+    "max_channels": 256,
+    "num_upsample_blocks": 3,
+    "use_pretrained_init": false,
+    "use_gradient_checkpointing": true,
+    "comment": "gradient_checkpointing=true saves VRAM at cost of speed"
+  },
+  "data": {
+    "train_latent_metadata": "data/cached_latents/train/latent_metadata.json",
+    "train_latents_dir": "data/cached_latents/train/latents",
+    "train_images_dir": "data/processed_images",
+    "train_masks_dir": null,
+    "val_latent_metadata": "data/cached_latents/val/latent_metadata.json",
+    "val_latents_dir": "data/cached_latents/val/latents",
+    "val_images_dir": "data/processed_images",
+    "val_masks_dir": null,
+    "resolution": 1024,
+    "comment": "Images are in flat processed_images dir. Latent metadata maps filenames."
+  },
+  "training": {
+    "num_epochs": 10,
+    "batch_size": 2,
+    "learning_rate": 5e-5,
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0,
+    "num_workers": 4,
+    "save_every": 5,
+    "output_dir": "checkpoints/tiny_vae",
+    "comment": "batch_size=2 for 24GB GPU with LPIPS. Use 4 if OOM still occurs."
+  },
+  "loss": {
+    "l1_weight": 1.0,
+    "l2_weight": 0.5,
+    "lpips_weight": 0.1,
+    "comment": "CRITICAL: LPIPS perceptual loss (0.1 weight) prevents blurry reconstructions!"
+  },
+  "logging": {
+    "use_wandb": true,
+    "wandb_project": "tiny-vae-training",
+    "run_name": "tinyvae-anime-v1-pretrained",
+    "log_every": 50,
+    "save_images_every": 1,
+    "compute_metrics_every": 5,
+    "comment": "Save validation images every epoch to monitor quality visually!"
+  }
+}

@@ -1,0 +1,23 @@
+[
+  {
+    "method": "baseline",
+    "compatible": true,
+    "steps": 20,
+    "time": 670.3283383846283,
+    "seconds_per_step": 33.51641691923142
+  },
+  {
+    "method": "lcm-lora",
+    "compatible": true,
+    "steps": 4,
+    "time": 103.83471870422363,
+    "seconds_per_step": 25.958679676055908
+  },
+  {
+    "method": "sdxl-lightning",
+    "compatible": true,
+    "steps": 4,
+    "time": 95.92147397994995,
+    "seconds_per_step": 23.980368494987488
+  }
+]

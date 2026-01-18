@@ -5,4 +5,7 @@ __pycache__
 venv/
 *.zip
 outputs/
-data/tags.json
+data/*
+checkpoints/
+onnx_models/
+hypothesis/*

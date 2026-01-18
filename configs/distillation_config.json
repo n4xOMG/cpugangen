@@ -1,0 +1,60 @@
+{
+  "teacher": {
+    "model_id": "martineux/janku6",
+    "comment": "Illustrious anime model (teacher)"
+  },
+  "student": {
+    "model_id": "checkpoints/pruned_student_init",
+    "comment": "Illustrious anime model (student)"
+  },
+  "data": {
+    "use_cached_latents": true,
+    "train_metadata": "data/preprocessed/train/metadata.json",
+    "val_metadata": "data/preprocessed/val/metadata.json",
+    "images_dir_train": "data/preprocessed/train",
+    "images_dir_val": "data/preprocessed/val",
+    "train_latent_metadata": "data/cached_latents/train/latent_metadata.json",
+    "train_latents_dir": "data/cached_latents/train/latents",
+    "val_latent_metadata": "data/cached_latents/val/latent_metadata.json",
+    "val_latents_dir": "data/cached_latents/val/latents",
+    "resolution": 1024,
+    "max_tags": 75,
+    "min_tag_score": 0.35,
+    "comment": "Using bucket-preprocessed images. Set use_cached_latents=true to use pre-cached latents for faster training"
+  },
+  "training": {
+    "num_epochs": 10,
+    "batch_size": 1,
+    "learning_rate": 5e-6,
+    "warmup_steps": 500,
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0,
+    "num_workers": 4,
+    "save_every": 2,
+    "output_dir": "checkpoints/anime_student",
+    "comment": "Lower LR with warmup for stable training. Batch size 1 for 3090 24GB."
+  },
+  "loss": {
+    "output_weight": 1.0,
+    "feature_weight": 2.0,
+    "attention_weight": 0.0,
+    "normalize_features": true,
+    "comment": "Feature weight increased to 2.0 to emphasize intermediate representations"
+  },
+  "feature_extraction": {
+    "layers": [
+      "down_blocks.1",
+      "down_blocks.2",
+      "up_blocks.0",
+      "up_blocks.1"
+    ],
+    "comment": "Extract from mid-level semantic blocks for best quality-performance tradeoff"
+  },
+  "logging": {
+    "use_wandb": true,
+    "wandb_project": "anime-student-distillation",
+    "run_name": "ssd1b-illustrious-v1",
+    "log_every": 50,
+    "comment": "Set use_wandb to false if you don't want WandB logging"
+  }
+}

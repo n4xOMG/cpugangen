@@ -1,0 +1,54 @@
+{
+  "teacher": {
+    "model_id": "martineux/janku6",
+    "comment": "Illustrious base model - Lightning LoRA will be applied in code"
+  },
+  
+  "student": {
+    "model_id": "segmind/SSD-1B",
+    "comment": "Smaller SSD-1B architecture for distillation"
+  },
+  
+  "data": {
+    "use_cached_latents": true,
+    "train_metadata": "data/preprocessed/train/metadata.json",
+    "val_metadata": "data/preprocessed/val/metadata.json",
+    "images_dir_train": "data/preprocessed/train",
+    "images_dir_val": "data/preprocessed/val",
+    "train_latent_metadata": "data/cached_latents/train/latent_metadata.json",
+    "train_latents_dir": "data/cached_latents/train/latents",
+    "val_latent_metadata": "data/cached_latents/val/latent_metadata.json",
+    "val_latents_dir": "data/cached_latents/val/latents",
+    "resolution": 1024,
+    "max_tags": 75,
+    "min_tag_score": 0.35,
+    "comment": "Using bucket-preprocessed images split into train/val folders"
+  },
+  
+  "training": {
+    "batch_size": 1,
+    "num_epochs": 10,
+    "learning_rate": 1e-5,
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0,
+    "num_workers": 0,
+    "save_every": 2,
+    "lightning_steps": 4,
+    "comment_lightning_steps": "Use 4-step Lightning timestep distribution during training"
+  },
+  
+  "loss": {
+    "output_weight": 1.0,
+    "feature_weight": 0.5,
+    "comment": "Output matching + intermediate feature matching"
+  },
+  
+  "logging": {
+    "use_wandb": true,
+    "wandb_project": "anime-distillation-lightning",
+    "run_name": "ssd1b_lightning_distill",
+    "log_every": 10
+  },
+  
+  "comment": "Lightning-specific distillation config. Teacher has Lightning LoRA applied before training begins."
+}

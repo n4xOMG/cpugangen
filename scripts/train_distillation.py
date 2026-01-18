@@ -1,0 +1,806 @@
+#!/usr/bin/env python3
+"""
+Knowledge Distillation Training Script for Anime-Specialized Student UNet
+
+Trains a smaller student UNet (SSD-1B architecture) using Illustrious as teacher.
+Uses layer-level feature matching and output matching for distillation.
+"""
+
+import os
+import argparse
+import json
+from pathlib import Path
+from typing import Dict, Optional
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
+from diffusers import (
+    StableDiffusionXLPipeline,
+    UNet2DConditionModel,
+    AutoencoderKL,
+    DDPMScheduler
+)
+from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
+from tqdm.auto import tqdm
+import wandb
+
+
+from dataset_anime import AnimeDistillationDataset, collate_fn
+from feature_extractor import UNetFeatureExtractor, get_default_feature_layers
+
+
+class DistillationLoss(nn.Module):
+    """
+    Multi-level distillation loss combining:
+    1. Output matching (MSE between final outputs)
+    2. Layer-level feature matching (MSE between intermediate features)
+    3. Optional attention map matching
+    """
+    
+    def __init__(
+        self,
+        output_weight: float = 1.0,
+        feature_weight: float = 0.5,
+        attention_weight: float = 0.1,
+        use_attention: bool = False,
+        normalize_features: bool = True
+    ):
+        super().__init__()
+        self.output_weight = output_weight
+        self.feature_weight = feature_weight
+        self.attention_weight = attention_weight
+        self.use_attention = use_attention
+        self.normalize_features = normalize_features
+        
+        # Feature aligner for dimension mismatches
+        from feature_extractor import FeatureAligner
+        self.feature_aligner = FeatureAligner()
+    
+    def _normalize_feature(self, feat: torch.Tensor) -> torch.Tensor:
+        """L2-normalize feature maps channel-wise."""
+        # Normalize along channel dimension (dim=1 for NCHW format)
+        norm = torch.norm(feat, p=2, dim=1, keepdim=True) + 1e-8
+        return feat / norm
+    
+    def forward(
+        self,
+        student_output: torch.Tensor,
+        teacher_output: torch.Tensor,
+        student_features: Optional[Dict] = None,
+        teacher_features: Optional[Dict] = None
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute distillation loss.
+        
+        Args:
+            student_output: Student UNet output
+            teacher_output: Teacher UNet output (detached)
+            student_features: Dict of intermediate features from student
+            teacher_features: Dict of intermediate features from teacher
+            
+        Returns:
+            Dict with total loss and component losses
+        """
+        losses = {}
+        
+        # 1. Output matching loss
+        output_loss = F.mse_loss(student_output, teacher_output)
+        losses['output'] = output_loss
+        
+        # 2. Feature matching loss (if features provided)
+        if student_features is not None and teacher_features is not None:
+            feature_loss = 0.0
+            num_features = 0
+            
+            for key in student_features.keys():
+                if key in teacher_features:
+                    s_feat = student_features[key]
+                    t_feat = teacher_features[key]
+                    
+                    # Normalize features if requested
+                    if self.normalize_features:
+                        s_feat = self._normalize_feature(s_feat)
+                        t_feat = self._normalize_feature(t_feat)
+                    
+                    # Align feature dimensions (spatial + channel)
+                    s_feat_aligned = self.feature_aligner(s_feat, t_feat, key)
+                    
+                    # Compute MSE loss
+                    feature_loss += F.mse_loss(s_feat_aligned, t_feat)
+                    num_features += 1
+            
+            if num_features > 0:
+                feature_loss = feature_loss / num_features
+                losses['feature'] = feature_loss
+            else:
+                losses['feature'] = torch.tensor(0.0, device=student_output.device)
+        else:
+            # No features provided
+            losses['feature'] = torch.tensor(0.0, device=student_output.device)
+        
+        # 3. Total loss
+        total_loss = (
+            self.output_weight * losses['output'] +
+            self.feature_weight * losses['feature']
+        )
+        losses['total'] = total_loss
+        
+        return losses
+
+
+
+def encode_prompts(
+    prompts: list[str],
+    text_encoder_1: CLIPTextModel,
+    text_encoder_2: CLIPTextModelWithProjection,
+    tokenizer_1: CLIPTokenizer,
+    tokenizer_2: CLIPTokenizer,
+    device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Encode text prompts using SDXL's dual text encoders.
+    
+    Returns:
+        (prompt_embeds, pooled_prompt_embeds)
+    """
+    # Tokenize
+    tokens_1 = tokenizer_1(
+        prompts,
+        padding="max_length",
+        max_length=tokenizer_1.model_max_length,
+        truncation=True,
+        return_tensors="pt"
+    ).input_ids.to(device)
+    
+    tokens_2 = tokenizer_2(
+        prompts,
+        padding="max_length",
+        max_length=tokenizer_2.model_max_length,
+        truncation=True,
+        return_tensors="pt"
+    ).input_ids.to(device)
+    
+    # Encode
+    with torch.no_grad():
+        encoder_output_1 = text_encoder_1(tokens_1, output_hidden_states=True)
+        encoder_output_2 = text_encoder_2(tokens_2, output_hidden_states=True)
+        
+        # Get last hidden states
+        prompt_embeds_1 = encoder_output_1.hidden_states[-2]  # penultimate layer
+        prompt_embeds_2 = encoder_output_2.hidden_states[-2]
+        
+        # Concatenate
+        prompt_embeds = torch.cat([prompt_embeds_1, prompt_embeds_2], dim=-1)
+        
+        # Get pooled embeddings from second encoder
+        pooled_prompt_embeds = encoder_output_2[0]
+    
+    return prompt_embeds, pooled_prompt_embeds
+
+
+def train_one_epoch(
+    teacher_unet: UNet2DConditionModel,
+    student_unet: UNet2DConditionModel,
+    vae: AutoencoderKL,
+    text_encoder_1: CLIPTextModel,
+    text_encoder_2: CLIPTextModelWithProjection,
+    tokenizer_1: CLIPTokenizer,
+    tokenizer_2: CLIPTokenizer,
+    noise_scheduler: DDPMScheduler,
+    dataloader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    scaler: GradScaler,
+    distillation_loss: DistillationLoss,
+    device: torch.device,
+    epoch: int,
+    config: Dict
+) -> float:
+    """Train for one epoch."""
+    
+    student_unet.train()
+    teacher_unet.eval()  # Teacher always in eval mode
+    
+    # Create feature extractors (outside loop for efficiency)
+    feature_layers = get_default_feature_layers('sdxl')
+    teacher_extractor = UNetFeatureExtractor(teacher_unet, feature_layers, normalize=False)
+    student_extractor = UNetFeatureExtractor(student_unet, feature_layers, normalize=False)
+    
+    total_loss = 0.0
+    progress_bar = tqdm(dataloader, desc=f"Epoch {epoch}")
+    
+    for step, batch in enumerate(progress_bar):
+        # Get batch
+        pixel_values = batch.get('pixel_values')
+        if pixel_values is not None:
+            pixel_values = pixel_values.to(device)
+        prompts = batch['prompts']
+        
+        # Encode prompts
+        prompt_embeds, pooled_prompt_embeds = encode_prompts(
+            prompts,
+            text_encoder_1,
+            text_encoder_2,
+            tokenizer_1,
+            tokenizer_2,
+            device
+        )
+        
+        # Get latents (either from batch or encode on-the-fly)
+        if 'latents' in batch:
+            # Using cached latents
+            latents = batch['latents'].to(device)
+        else:
+            # Encode images to latents (original behavior)
+            with torch.no_grad():
+                latents = vae.encode(pixel_values).latent_dist.sample()
+                latents = latents * vae.config.scaling_factor
+        
+        # Sample noise
+        noise = torch.randn_like(latents)
+        batch_size = latents.shape[0]
+        
+        # Sample timesteps
+        timesteps = torch.randint(
+            0, noise_scheduler.config.num_train_timesteps, 
+            (batch_size,), 
+            device=device
+        ).long()
+        
+        # Add noise to latents
+        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+        
+        # Prepare added_cond_kwargs for SDXL
+        add_time_ids = torch.tensor([
+            [1024, 1024,  # original_size
+             0, 0,        # crops_coords_top_left
+             1024, 1024]  # target_size
+        ]).repeat(batch_size, 1).to(device)
+        
+        added_cond_kwargs = {
+            "text_embeds": pooled_prompt_embeds,
+            "time_ids": add_time_ids
+        }
+        
+        # Forward pass with mixed precision
+        with autocast():
+            # Teacher forward (no grad) with feature extraction
+            with torch.no_grad():
+                teacher_output = teacher_extractor.extract(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states=prompt_embeds,
+                    added_cond_kwargs=added_cond_kwargs,
+                    return_dict=False
+                )[0]
+                teacher_features = teacher_extractor.get_features()
+            
+            # Student forward with feature extraction
+            student_output = student_extractor.extract(
+                noisy_latents,
+                timesteps,
+                encoder_hidden_states=prompt_embeds,
+                added_cond_kwargs=added_cond_kwargs,
+                return_dict=False
+            )[0]
+            student_features = student_extractor.get_features()
+            
+            # Compute distillation loss with features
+            losses = distillation_loss(
+                student_output,
+                teacher_output.detach(),
+                student_features=student_features,
+                teacher_features=teacher_features
+            )
+            
+            loss = losses['total']
+        
+        # Backward pass
+        scaler.scale(loss).backward()
+        
+        # Gradient clipping
+        if config['training']['max_grad_norm'] > 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                student_unet.parameters(), 
+                config['training']['max_grad_norm']
+            )
+        
+        # Optimizer step
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)  # set_to_none=True saves memory
+        
+        # Update learning rate scheduler if exists (moved outside autocast)
+        if 'scheduler' in locals() and scheduler is not None:
+            scheduler.step()
+        
+        # Clear feature caches to save memory
+        teacher_extractor.clear()
+        student_extractor.clear()
+        
+        # Logging
+        total_loss += loss.item()
+        progress_bar.set_postfix({
+            'loss': f"{loss.item():.4f}",
+            'output_loss': f"{losses.get('output', 0):.4f}",
+            'feature_loss': f"{losses.get('feature', 0):.4f}"
+        })
+        
+        # Log to wandb
+        if step % config['logging']['log_every'] == 0:
+            # Helper to get item if tensor, else return value
+            def get_val(v):
+                return v.item() if hasattr(v, 'item') else v
+
+            wandb.log({
+                'train/loss': loss.item(),
+                'train/output_loss': get_val(losses.get('output', 0)),
+                'train/feature_loss': get_val(losses.get('feature', 0)),
+                'train/epoch': epoch,
+                'train/step': step
+            })
+    
+    return total_loss / len(dataloader)
+
+
+@torch.no_grad()
+def validate(
+    teacher_unet: UNet2DConditionModel,
+    student_unet: UNet2DConditionModel,
+    vae: AutoencoderKL,
+    text_encoder_1: CLIPTextModel,
+    text_encoder_2: CLIPTextModelWithProjection,
+    tokenizer_1: CLIPTokenizer,
+    tokenizer_2: CLIPTokenizer,
+    noise_scheduler: DDPMScheduler,
+    dataloader: DataLoader,
+    distillation_loss: DistillationLoss,
+    device: torch.device,
+    epoch: int
+) -> float:
+    """Validate the student model."""
+    
+    student_unet.eval()
+    teacher_unet.eval()
+    
+    # Create feature extractors
+    feature_layers = get_default_feature_layers('sdxl')
+    teacher_extractor = UNetFeatureExtractor(teacher_unet, feature_layers, normalize=False)
+    student_extractor = UNetFeatureExtractor(student_unet, feature_layers, normalize=False)
+    
+    # Load LPIPS model for perceptual metrics (on first batch only)
+    try:
+        import lpips
+        lpips_model = lpips.LPIPS(net='vgg').to(device)
+        lpips_model.eval()
+        compute_lpips = True
+    except ImportError:
+        print("Warning: lpips not installed, skipping perceptual metrics")
+        compute_lpips = False
+    
+    total_loss = 0.0
+    total_lpips = 0.0
+    total_ssim = 0.0
+    lpips_count = 0
+    ssim_count = 0
+    
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Validating")):
+        prompts = batch['prompts']
+        
+        # Encode prompts (Moved OUTSIDE if/else so variables exist)
+        prompt_embeds, pooled_prompt_embeds = encode_prompts(
+            prompts, text_encoder_1, text_encoder_2,
+            tokenizer_1, tokenizer_2, device
+        )
+
+        # Get latents
+        if 'latents' in batch:
+            # Use cached latents
+            latents = batch['latents'].to(device)
+        else:
+            # Encode on the fly
+            pixel_values = batch['pixel_values'].to(device)
+            latents = vae.encode(pixel_values).latent_dist.sample()
+            latents = latents * vae.config.scaling_factor
+        
+        noise = torch.randn_like(latents)
+        batch_size = latents.shape[0]
+        timesteps = torch.randint(
+            0, noise_scheduler.config.num_train_timesteps,
+            (batch_size,), device=device
+        ).long()
+        
+        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+        
+        add_time_ids = torch.tensor([
+            [1024, 1024, 0, 0, 1024, 1024]
+        ]).repeat(batch_size, 1).to(device)
+        
+        added_cond_kwargs = {
+            "text_embeds": pooled_prompt_embeds,
+            "time_ids": add_time_ids
+        }
+        
+        # Use autocast for validation to handle FP16 teacher
+        with autocast():
+            # Extract features from teacher
+            teacher_output = teacher_extractor.extract(
+                noisy_latents, timesteps,
+                encoder_hidden_states=prompt_embeds,
+                added_cond_kwargs=added_cond_kwargs,
+                return_dict=False
+            )[0]
+            teacher_features = teacher_extractor.get_features()
+            
+            # Extract features from student
+            student_output = student_extractor.extract(
+                noisy_latents, timesteps,
+                encoder_hidden_states=prompt_embeds,
+                added_cond_kwargs=added_cond_kwargs,
+                return_dict=False
+            )[0]
+            student_features = student_extractor.get_features()
+        
+        # Compute distillation loss with features
+        losses = distillation_loss(
+            student_output, 
+            teacher_output,
+            student_features=student_features,
+            teacher_features=teacher_features
+        )
+        total_loss += losses['total'].item()
+        
+        # Compute perceptual metrics on first 2 batches only (expensive)
+        if batch_idx < 2 and compute_lpips:
+            try:
+                # Decode latents to images
+                with torch.no_grad():
+                    # Scale latents back from noise prediction space
+                    student_images = vae.decode(student_output / vae.config.scaling_factor).sample
+                    teacher_images = vae.decode(teacher_output / vae.config.scaling_factor).sample
+                    
+                    # Clamp to [-1, 1] range for LPIPS
+                    student_images = torch.clamp(student_images, -1, 1)
+                    teacher_images = torch.clamp(teacher_images, -1, 1)
+                    
+                    # Compute LPIPS
+                    lpips_val = lpips_model(student_images, teacher_images).mean()
+                    total_lpips += lpips_val.item()
+                    lpips_count += 1
+                    
+                    # Compute SSIM (simple implementation)
+                    from torchmetrics.functional import structural_similarity_index_measure
+                    ssim_val = structural_similarity_index_measure(
+                        (student_images + 1) / 2,  # Scale to [0, 1]
+                        (teacher_images + 1) / 2,
+                        data_range=1.0
+                    )
+                    total_ssim += ssim_val.item()
+                    ssim_count += 1
+            except Exception as e:
+                print(f"Warning: Perceptual metrics failed: {e}")
+        
+        # Clear feature caches
+        teacher_extractor.clear()
+        student_extractor.clear()
+    
+    avg_loss = total_loss / len(dataloader)
+    
+    # Log to wandb
+    log_dict = {
+        'val/loss': avg_loss,
+        'val/epoch': epoch
+    }
+    
+    if lpips_count > 0:
+        log_dict['val/lpips'] = total_lpips / lpips_count
+    if ssim_count > 0:
+        log_dict['val/ssim'] = total_ssim / ssim_count
+    
+    wandb.log(log_dict)
+    
+    return avg_loss
+
+
+def main(args):
+    # Load config
+    with open(args.config, 'r') as f:
+        config = json.load(f)
+    
+    # Setup device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    # Initialize wandb
+    if config['logging']['use_wandb']:
+        wandb.init(
+            project=config['logging']['wandb_project'],
+            name=config['logging']['run_name'],
+            config=config
+        )
+    
+    # Create output directory
+    os.makedirs(config['training']['output_dir'], exist_ok=True)
+    
+    print("\n" + "="*60)
+    print("Loading Models")
+    print("="*60)
+    
+    
+    # Load teacher pipeline (Illustrious) in FP16 to save memory
+    print(f"Loading teacher model: {config['teacher']['model_id']}")
+    teacher_pipe = StableDiffusionXLPipeline.from_pretrained(
+        config['teacher']['model_id'],
+        torch_dtype=torch.float16,  # CRITICAL: Use FP16 for Teacher
+    )
+    
+    teacher_unet = teacher_pipe.unet.to(device)
+    teacher_unet.requires_grad_(False)  # Freeze teacher
+    
+    # Load student UNet (SSD-1B architecture)
+    print(f"Loading student model: {config['student']['model_id']}")
+    try:
+        # Try loading as full pipeline first (for standard models like SSD-1B)
+        student_pipe = StableDiffusionXLPipeline.from_pretrained(
+            config['student']['model_id'],
+            torch_dtype=torch.float32,
+        )
+        student_unet = student_pipe.unet.to(device)
+    except OSError:
+        # Fallback to loading just the UNet (for pruned local checkpoints)
+        print("Pipeline load failed, trying generic UNet loading...")
+        student_unet = UNet2DConditionModel.from_pretrained(
+            config['student']['model_id'],
+            torch_dtype=torch.float32
+        ).to(device)
+    
+    # Enable Gradient Checkpointing for Student
+    student_unet.enable_gradient_checkpointing()
+    print("Enabled gradient checkpointing for Student UNet")
+
+    # Enable Memory Efficient Attention (xformers or SDPA) if available
+    if torch.cuda.is_available():
+        try:
+            student_unet.enable_xformers_memory_efficient_attention()
+            teacher_unet.enable_xformers_memory_efficient_attention()
+            print("Enabled xformers memory efficient attention")
+        except Exception:
+            print("xformers not found, using standard attention (might OOM)")
+
+    # Only load VAE to GPU if we are NOT using cached latents
+    # If using cached latents, we don't need VAE for encoding during train
+    use_cached_latents = config['data'].get('use_cached_latents', False)
+    
+    if not use_cached_latents:
+        vae = teacher_pipe.vae.to(device)
+    else:
+        # Keep VAE on CPU or don't move it
+        vae = teacher_pipe.vae
+        print("Using cached latents, VAE kept on CPU to save VRAM")
+
+    vae.requires_grad_(False)
+    
+    text_encoder_1 = teacher_pipe.text_encoder.to(device)
+    text_encoder_1.requires_grad_(False)
+    
+    text_encoder_2 = teacher_pipe.text_encoder_2.to(device)
+    text_encoder_2.requires_grad_(False)
+    
+    tokenizer_1 = teacher_pipe.tokenizer
+    tokenizer_2 = teacher_pipe.tokenizer_2
+    
+    # Noise scheduler
+    noise_scheduler = DDPMScheduler.from_pretrained(
+        config['teacher']['model_id'],
+        subfolder="scheduler"
+    )
+    
+    # Print model sizes
+    teacher_params = sum(p.numel() for p in teacher_unet.parameters())
+    student_params = sum(p.numel() for p in student_unet.parameters())
+    print(f"\nTeacher UNet: {teacher_params:,} parameters")
+    print(f"Student UNet: {student_params:,} parameters")
+    print(f"Reduction: {(1 - student_params/teacher_params)*100:.1f}%")
+    
+    # Create datasets
+    print("\n" + "="*60)
+    print("Loading Dataset")
+    print("="*60)
+    
+    
+    # Load datasets based on config
+    use_cached = config['data'].get('use_cached_latents', False)
+    
+    if use_cached:
+        print("Using cached latents (faster training)...")
+        from dataset_anime import CachedLatentDataset, collate_fn_cached
+        
+        train_dataset = CachedLatentDataset(
+            latent_metadata_path=config['data']['train_latent_metadata'],
+            latents_dir=config['data']['train_latents_dir'],
+            max_tags=config['data']['max_tags']
+        )
+        
+        val_dataset = CachedLatentDataset(
+            latent_metadata_path=config['data']['val_latent_metadata'],
+            latents_dir=config['data']['val_latents_dir'],
+            max_tags=config['data']['max_tags']
+        )
+        
+        batch_collate_fn = collate_fn_cached
+    else:
+        print("Using on-the-fly image encoding...")
+        train_dataset = AnimeDistillationDataset(
+            metadata_path=config['data']['train_metadata'],
+            images_dir=config['data']['images_dir'],
+            resolution=config['data']['resolution'],
+            max_tags=config['data']['max_tags'],
+            min_tag_score=config['data']['min_tag_score']
+        )
+        
+        val_dataset = AnimeDistillationDataset(
+            metadata_path=config['data']['val_metadata'],
+            images_dir=config['data']['images_dir'],
+            resolution=config['data']['resolution'],
+            max_tags=config['data']['max_tags'],
+            min_tag_score=config['data']['min_tag_score']
+        )
+        
+        batch_collate_fn = collate_fn
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['training']['batch_size'],
+        shuffle=True,
+        num_workers=config['training']['num_workers'],
+        collate_fn=batch_collate_fn,
+        pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['training']['batch_size'],
+        shuffle=False,
+        num_workers=config['training']['num_workers'],
+        collate_fn=batch_collate_fn,
+        pin_memory=True
+    )
+    
+    print(f"Train samples: {len(train_dataset)}")
+    print(f"Val samples: {len(val_dataset)}")
+    
+    # Setup training
+    distillation_loss = DistillationLoss(
+        output_weight=config['loss']['output_weight'],
+        feature_weight=config['loss']['feature_weight']
+    )
+    
+    scaler = GradScaler()
+    
+    # Optimizer creation with 8-bit Adam support
+    try:
+        import bitsandbytes as bnb
+        print("Using 8-bit AdamW optimizer (saves significantly more memory)")
+        optimizer = bnb.optim.AdamW8bit(
+            student_unet.parameters(),
+            lr=config['training']['learning_rate'],
+            weight_decay=config['training']['weight_decay']
+        )
+    except ImportError:
+        print("bitsandbytes not found, using standard AdamW (higher memory usage)")
+        print("Tip: `pip install bitsandbytes` to resolve OOM errors")
+        optimizer = torch.optim.AdamW(
+            student_unet.parameters(),
+            lr=config['training']['learning_rate'],
+            weight_decay=config['training']['weight_decay']
+        )
+    
+    # Create learning rate scheduler with warmup
+    warmup_steps = config['training'].get('warmup_steps', 0)
+    total_steps = len(train_loader) * config['training']['num_epochs']
+    
+    if warmup_steps > 0:
+        print(f"Using cosine LR scheduler with {warmup_steps} warmup steps")
+        
+        import math
+        def get_cosine_schedule_with_warmup(current_step: int) -> float:
+            """Cosine learning rate schedule with linear warmup."""
+            if current_step < warmup_steps:
+                # Linear warmup
+                return float(current_step) / float(max(1, warmup_steps))
+            # Cosine decay
+            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+        
+        from torch.optim.lr_scheduler import LambdaLR
+        scheduler = LambdaLR(optimizer, get_cosine_schedule_with_warmup)
+    else:
+        scheduler = None
+    
+    # Training loop
+    print("\n" + "="*60)
+    print("Starting Training")
+    print("="*60)
+    
+    best_val_loss = float('inf')
+    
+    for epoch in range(config['training']['num_epochs']):
+        print(f"\nEpoch {epoch+1}/{config['training']['num_epochs']}")
+        
+        # Train
+        train_loss = train_one_epoch(
+            teacher_unet, student_unet, vae,
+            text_encoder_1, text_encoder_2,
+            tokenizer_1, tokenizer_2,
+            noise_scheduler, train_loader,
+            optimizer, scaler, distillation_loss,
+            device, epoch, config
+        )
+        
+        print(f"Train Loss: {train_loss:.4f}")
+        
+        # Validate
+        val_loss = validate(
+            teacher_unet, student_unet, vae,
+            text_encoder_1, text_encoder_2,
+            tokenizer_1, tokenizer_2,
+            noise_scheduler, val_loader,
+            distillation_loss, device, epoch
+        )
+        
+        print(f"Val Loss: {val_loss:.4f}")
+        
+        # Save checkpoint
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            checkpoint_path = os.path.join(
+                config['training']['output_dir'],
+                "best_student_unet.pt"
+            )
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': student_unet.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': val_loss,
+                'config': config
+            }, checkpoint_path)
+            print(f"✅ Saved best model! Val loss: {val_loss:.4f}")
+        
+        # Save periodic checkpoint
+        if (epoch + 1) % config['training']['save_every'] == 0:
+            checkpoint_path = os.path.join(
+                config['training']['output_dir'],
+                f"student_unet_epoch{epoch+1}.pt"
+            )
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': student_unet.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': val_loss,
+                'config': config
+            }, checkpoint_path)
+            print(f"💾 Saved checkpoint: {checkpoint_path}")
+    
+    print("\n" + "="*60)
+    print("✅ Training Complete!")
+    print("="*60)
+    print(f"Best validation loss: {best_val_loss:.4f}")
+    
+    if config['logging']['use_wandb']:
+        wandb.finish()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train anime-specialized student UNet")
+    parser.add_argument(
+        '--config',
+        type=str,
+        default='configs/distillation_config.json',
+        help='Path to config file'
+    )
+    args = parser.parse_args()
+    
+    main(args)
